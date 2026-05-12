@@ -1,0 +1,6 @@
+{
+  "name": "Remix II : GeoArc SIG",
+  "description": "Asistente técnico pedagógico de procesamiento geométrico y SIG. Permite a docentes y estudiantes de arquitectura generar curvas de nivel desde archivos FBX y PLY con normalización de CRS y explicaciones paso a paso.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

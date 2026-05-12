@@ -1,0 +1,71 @@
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --color-bg-base: var(--theme-bg-base);
+  --color-bg-surface: var(--theme-bg-surface);
+  --color-bg-elevated: var(--theme-bg-elevated);
+  --color-bg-input: var(--theme-bg-input);
+  --color-text-main: var(--theme-text-main);
+  --color-text-muted: var(--theme-text-muted);
+  --color-text-faded: var(--theme-text-faded);
+  --color-text-subtle: var(--theme-text-subtle);
+  --color-border-main: var(--theme-border-main);
+  --color-border-strong: var(--theme-border-strong);
+  --color-border-faded: var(--theme-border-faded);
+	
+  --color-accent: var(--theme-accent);
+  --color-accent-hover: var(--theme-accent-hover);
+  --color-accent-faded: var(--theme-accent-faded);
+  --color-accent-subtle: var(--theme-accent-subtle);
+  
+  --font-sans: "Montserrat", ui-sans-serif, system-ui, sans-serif;
+}
+
+:root {
+  --theme-bg-base: #F8F9FA; /* Blanco grisáceo */
+  --theme-bg-surface: #FFFFFF; /* Blanco puro */
+  --theme-bg-elevated: #F1F3F5; 
+  --theme-bg-input: #FFFFFF; 
+  --theme-text-main: #000000; /* Negro para mayor contraste */
+  --theme-text-muted: #31363A; /* Gris Oscuro Estructura */
+  --theme-text-faded: rgba(49, 54, 58, 0.6); 
+  --theme-text-subtle: rgba(49, 54, 58, 0.3);
+  --theme-border-main: rgba(49, 54, 58, 0.15);
+  --theme-border-strong: rgba(49, 54, 58, 0.3);
+  --theme-border-faded: rgba(49, 54, 58, 0.05);
+
+  --theme-accent: #DA291C; /* Rojo Institucional */
+  --theme-accent-hover: #B82218;
+  --theme-accent-faded: rgba(218, 41, 28, 0.1);
+  --theme-accent-subtle: rgba(218, 41, 28, 0.05);
+}
+
+/* Borramos el tema oscuro para forzar el esquema solicitado */
+:root[data-theme="dark"] {
+  --theme-bg-base: #121212; 
+  --theme-bg-surface: #1E1E1E; 
+  --theme-bg-elevated: #2D2D2D; 
+  --theme-bg-input: #121212; 
+  --theme-text-main: #FFFFFF; 
+  --theme-text-muted: #E0E0E0; 
+  --theme-text-faded: rgba(255, 255, 255, 0.6); 
+  --theme-text-subtle: rgba(255, 255, 255, 0.3);
+  --theme-border-main: rgba(255, 255, 255, 0.15);
+  --theme-border-strong: rgba(255, 255, 255, 0.3);
+  --theme-border-faded: rgba(255, 255, 255, 0.05);
+
+  --theme-accent: #DA291C; 
+  --theme-accent-hover: #E35248;
+  --theme-accent-faded: rgba(218, 41, 28, 0.15);
+  --theme-accent-subtle: rgba(218, 41, 28, 0.05);
+}
+
+body {
+  background-color: var(--theme-bg-base);
+  color: var(--theme-text-main);
+  margin: 0;
+  padding: 0;
+  transition: background-color 0.3s ease, color 0.3s ease;
+  font-family: var(--font-sans);
+}
