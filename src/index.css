@@ -34,6 +34,7 @@
   --theme-border-main: rgba(49, 54, 58, 0.15);
   --theme-border-strong: rgba(49, 54, 58, 0.3);
   --theme-border-faded: rgba(49, 54, 58, 0.05);
+  --theme-shadow-solar: #000000;
 
   --theme-accent: #DA291C; /* Rojo Institucional */
   --theme-accent-hover: #B82218;
@@ -54,6 +55,7 @@
   --theme-border-main: rgba(255, 255, 255, 0.15);
   --theme-border-strong: rgba(255, 255, 255, 0.3);
   --theme-border-faded: rgba(255, 255, 255, 0.05);
+  --theme-shadow-solar: #c8c886;
 
   --theme-accent: #DA291C; 
   --theme-accent-hover: #E35248;
@@ -69,3 +71,20 @@ body {
   transition: background-color 0.3s ease, color 0.3s ease;
   font-family: var(--font-sans);
 }
+
+/* Custom slim scrollbar for panels */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--theme-border-strong);
+  border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--theme-accent);
+}
+

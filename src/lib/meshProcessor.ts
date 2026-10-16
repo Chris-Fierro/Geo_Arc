@@ -13,6 +13,8 @@ export interface MeshData {
   rows?: number;
   buildings?: any;
   bbox?: { minLat: number; maxLat: number; minLon: number; maxLon: number; };
+  satelliteTexture?: string;
+  satelliteWorldFile?: string;
 }
 
 export async function processMeshFile(file: File, gridSize = 150): Promise<MeshData> {

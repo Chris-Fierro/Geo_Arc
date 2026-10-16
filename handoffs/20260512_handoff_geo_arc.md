@@ -4,7 +4,12 @@ Este documento es un resumen exhaustivo de todo el trabajo de refactorización y
 
 ---
 
-## 1. Restricción Estricta de Formatos de Archivo 3D
+## 1. Estado del Control de Versiones (Git)
+El proyecto ha sido inicializado como un repositorio Git para asegurar puntos de control.
+*   **Rama Principal (`main`):** Contiene el commit inicial con la base estable.
+*   **Rama Activa Actual:** `feature/topography-improvements` (Desde aquí continuaremos iterando).
+
+## 2. Restricción Estricta de Formatos de Archivo 3D
 Se ha modificado el pipeline de importación para enfocar la herramienta en flujos topográficos estándar.
 *   **Formatos Permitidos:** Única y exclusivamente **`.fbx`** y **`.ply`**.
 *   **Archivos Modificados:** `App.tsx` (frontend UI) y `meshProcessor.ts` (backend parser).
@@ -13,7 +18,7 @@ Se ha modificado el pipeline de importación para enfocar la herramienta en fluj
     *   Se ajustaron los atributos `accept` de los `<input type="file">` y la lógica del Drag & Drop.
     *   Implementación de validación rígida que bloquea archivos con extensiones no válidas y lanza una advertencia visual al usuario.
 
-## 2. Incorporación de Controles Didácticos y Pedagógicos
+## 3. Incorporación de Controles Didácticos y Pedagógicos
 El panel izquierdo de parámetros (`App.tsx`) ha sido enriquecido para permitir una mayor exploración topográfica:
 *   **Presets de Equidistancia:** Botones rápidos de 0.5m, 1m, 5m y 10m.
 *   **Filtrado Altimétrico:** Nuevos inputs numéricos de **Cota Mínima** y **Cota Máxima** que permiten esconder curvas de nivel fuera del rango de interés.
@@ -22,7 +27,7 @@ El panel izquierdo de parámetros (`App.tsx`) ha sido enriquecido para permitir 
     *   `Térmico` (d3.interpolateInferno).
     *   `Hipso` (Paleta Hipsométrica personalizada de verde a marrón y nieve).
 
-## 3. Mejoras del Motor de Renderizado Topográfico (ContourViewer.tsx)
+## 4. Mejoras del Motor de Renderizado Topográfico (ContourViewer.tsx)
 Toda la lógica de renderización basada en D3.js ha sido mejorada significativamente para dar soporte a las funciones cartográficas profesionales:
 *   **Curvas Maestras e Intermedias:** Diferenciación en grosor (`strokeWidth`) y opacidad. Por defecto se resalta 1 curva maestra cada 5 intermedias.
 *   **Etiquetado Automático (Cotas):** Se agregó texto con la altura (ej. `320.5m`) sobre el trazado de las curvas maestras en la vista de Planta. Las etiquetas usan trigonometría (`Math.atan2`) para seguir la rotación del vector de la línea.
@@ -30,7 +35,7 @@ Toda la lógica de renderización basada en D3.js ha sido mejorada significativa
 *   **Corrección Bug "Stack 3D":** Se condicionó el color de relleno del SVG (`fillOpacity="0"`) al activar la vista Perspectiva. Esto resolvió el problema donde el terreno parecía una pila de cajas sólidas horizontales, logrando un wireframe limpio en 3D.
 *   **Corrección Layout CSS:** Se eliminó la restricción de altura rígida (`h-[700px]`) reemplazándola por una flexión dinámica (`h-full min-h-[600px]`). Ahora el canvas ocupa el 100% de la zona vertical derecha, eliminando el exceso de fondo negro.
 
-## 4. Expansión de Captura de OpenStreetMap (OSM)
+## 5. Expansión de Captura de OpenStreetMap (OSM)
 Se amplió la extracción de infraestructura local para dotar de mayor riqueza a los mapas generados (`OsmImporter.tsx` y `ContourViewer.tsx`):
 *   **Extracción de Vías Fluviales:** Se actualizó el query de Overpass API para descargar también cuerpos de agua lineales (`way["waterway"]`).
 *   **Anchos Inferidos (Grosor Geométrico):** La aplicación ahora lee las etiquetas OSM y deduce el ancho de la línea de la vida real. Una `motorway` (autopista) se dibuja mucho más gruesa que un `footway` (sendero peatonal), y un `river` (río) más grueso que un `stream` (arroyo).

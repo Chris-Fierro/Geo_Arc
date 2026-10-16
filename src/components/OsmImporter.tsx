@@ -1,11 +1,20 @@
-import React, { useState, useEffect } from 'react';
-import { Search, MapPin, Download } from 'lucide-react';
-import { MapContainer, TileLayer, Marker, useMap, useMapEvents, LayersControl } from 'react-leaflet';
+import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { motion, AnimatePresence } from 'motion/react';
+import {
+  Search, MapPin, Download, Maximize2, Minimize2, Check, X,
+  Square, Shapes, Trash2, CheckCircle2, Ruler
+} from 'lucide-react';
+import {
+  MapContainer, TileLayer, Marker, useMap, useMapEvents, LayersControl,
+  Polygon, Rectangle, Polyline, CircleMarker
+} from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import { decode } from 'fast-png';
+import { fetchSatelliteOrthophoto, SatelliteResult } from '../lib/satelliteService';
 
-const customIcon = new L.Icon({
+const customPinIcon = new L.Icon({
   iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
   iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
   shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
@@ -16,21 +25,153 @@ const customIcon = new L.Icon({
   shadowSize: [41, 41]
 });
 
+// Custom Icon for Centroid
+const centroidIcon = new L.DivIcon({
+  className: 'custom-centroid-marker',
+  html: `
+    <div style="
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    ">
+      <div style="
+        width: 22px;
+        height: 22px;
+        background: #DA291C;
+        border: 2.5px solid #FFFFFF;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 0 14px rgba(218, 41, 28, 0.9), 0 2px 6px rgba(0,0,0,0.6);
+      ">
+        <div style="width: 5px; height: 5px; background: #FFFFFF; border-radius: 50%;"></div>
+      </div>
+      <div style="
+        background: rgba(20, 20, 20, 0.92);
+        color: #FFFFFF;
+        border: 1px solid rgba(218, 41, 28, 0.8);
+        font-size: 9px;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        padding: 2px 7px;
+        border-radius: 3px;
+        white-space: nowrap;
+        margin-top: 4px;
+        box-shadow: 0 3px 8px rgba(0,0,0,0.5);
+      ">
+        Centro Geométrico
+      </div>
+    </div>
+  `,
+  iconSize: [24, 24],
+  iconAnchor: [0, 0]
+});
+
+export interface PolygonMetrics {
+  areaM2: number;
+  perimeterM: number;
+  widthM?: number;
+  heightM?: number;
+  centroid: [number, number];
+}
+
+export function calculatePolygonMetrics(pts: [number, number][], isRectangle = false): PolygonMetrics | null {
+  if (!pts || pts.length < 3) return null;
+
+  const lat0 = pts.reduce((s, p) => s + p[0], 0) / pts.length;
+  const lon0 = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+  const latFactor = 111320;
+  const lonFactor = 111320 * Math.cos((lat0 * Math.PI) / 180);
+
+  const metricPts = pts.map(p => ({
+    x: (p[1] - lon0) * lonFactor,
+    y: (p[0] - lat0) * latFactor,
+  }));
+
+  const n = metricPts.length;
+
+  let perimeter = 0;
+  for (let i = 0; i < n; i++) {
+    const next = metricPts[(i + 1) % n];
+    const dx = next.x - metricPts[i].x;
+    const dy = next.y - metricPts[i].y;
+    perimeter += Math.sqrt(dx * dx + dy * dy);
+  }
+
+  let areaSum = 0;
+  let cxSum = 0;
+  let cySum = 0;
+
+  for (let i = 0; i < n; i++) {
+    const p1 = metricPts[i];
+    const p2 = metricPts[(i + 1) % n];
+    const cross = p1.x * p2.y - p2.x * p1.y;
+    areaSum += cross;
+    cxSum += (p1.x + p2.x) * cross;
+    cySum += (p1.y + p2.y) * cross;
+  }
+
+  const areaM2 = Math.abs(areaSum) / 2;
+
+  let centroidX = 0;
+  let centroidY = 0;
+
+  if (Math.abs(areaSum) > 1e-6) {
+    centroidX = cxSum / (3 * areaSum);
+    centroidY = cySum / (3 * areaSum);
+  } else {
+    centroidX = metricPts.reduce((s, p) => s + p.x, 0) / n;
+    centroidY = metricPts.reduce((s, p) => s + p.y, 0) / n;
+  }
+
+  const centroidLat = lat0 + centroidY / latFactor;
+  const centroidLon = lon0 + centroidX / lonFactor;
+
+  let widthM: number | undefined;
+  let heightM: number | undefined;
+
+  if (isRectangle && pts.length === 4) {
+    const xs = metricPts.map(p => p.x);
+    const ys = metricPts.map(p => p.y);
+    widthM = Math.max(...xs) - Math.min(...xs);
+    heightM = Math.max(...ys) - Math.min(...ys);
+  }
+
+  return {
+    areaM2,
+    perimeterM: perimeter,
+    widthM,
+    heightM,
+    centroid: [centroidLat, centroidLon],
+  };
+}
+
+export function formatArea(m2: number): string {
+  if (m2 >= 10000) {
+    const ha = m2 / 10000;
+    return `${m2.toLocaleString('es-CL', { maximumFractionDigits: 0 })} m² (${ha.toFixed(2)} ha)`;
+  }
+  return `${m2.toLocaleString('es-CL', { maximumFractionDigits: 0 })} m²`;
+}
+
+export function formatDistance(m: number): string {
+  if (m >= 1000) {
+    return `${(m / 1000).toFixed(2)} km`;
+  }
+  return `${Math.round(m)} m`;
+}
+
 interface OsmImporterProps {
   onDataFetched: (data: any, name: string) => void;
 }
 
-// Component to handle map clicks
-function LocationSelector({ position, setPosition }: { position: [number, number], setPosition: (p: [number, number]) => void }) {
-  useMapEvents({
-    click(e) {
-      setPosition([e.latlng.lat, e.latlng.lng]);
-    },
-  });
-  return <Marker position={position} icon={customIcon} />;
-}
+export type SelectionMode = 'regular' | 'irregular' | 'point';
 
-// Component to fly map to search result
+// Map Controller for flying to center
 function MapController({ center }: { center: [number, number] }) {
   const map = useMap();
   useEffect(() => {
@@ -39,24 +180,267 @@ function MapController({ center }: { center: [number, number] }) {
   return null;
 }
 
+// Invalidate size on mount / expansion
+function MapResizer() {
+  const map = useMap();
+  useEffect(() => {
+    map.invalidateSize();
+    const t1 = setTimeout(() => map.invalidateSize(), 150);
+    const t2 = setTimeout(() => map.invalidateSize(), 350);
+    const t3 = setTimeout(() => map.invalidateSize(), 600);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+    };
+  }, [map]);
+  return null;
+}
+
+// Sidebar Map Synchronization
+function SidebarMapSync({ center }: { center: [number, number] }) {
+  const map = useMap();
+  useEffect(() => {
+    map.flyTo(center, 13);
+    map.invalidateSize();
+  }, [center, map]);
+  return null;
+}
+
+// Interactive Map Drawing Controller
+interface MapDrawControllerProps {
+  mode: SelectionMode;
+  polygon: [number, number][] | null;
+  metrics: PolygonMetrics | null;
+  rectStart: [number, number] | null;
+  rectCurrent: [number, number] | null;
+  irregularPoints: [number, number][];
+  mousePos: [number, number] | null;
+  onPointSelect: (pos: [number, number]) => void;
+  onRectClick: (pos: [number, number]) => void;
+  onRectMove: (pos: [number, number]) => void;
+  onIrregularClick: (pos: [number, number]) => void;
+  onIrregularMove: (pos: [number, number]) => void;
+  onIrregularDblClick: () => void;
+  pointPosition: [number, number];
+}
+
+function MapDrawController({
+  mode,
+  polygon,
+  metrics,
+  rectStart,
+  rectCurrent,
+  irregularPoints,
+  mousePos,
+  onPointSelect,
+  onRectClick,
+  onRectMove,
+  onIrregularClick,
+  onIrregularMove,
+  onIrregularDblClick,
+  pointPosition,
+}: MapDrawControllerProps) {
+  useMapEvents({
+    click(e) {
+      const pos: [number, number] = [e.latlng.lat, e.latlng.lng];
+      if (mode === 'point') {
+        onPointSelect(pos);
+      } else if (mode === 'regular') {
+        onRectClick(pos);
+      } else if (mode === 'irregular') {
+        onIrregularClick(pos);
+      }
+    },
+    mousemove(e) {
+      const pos: [number, number] = [e.latlng.lat, e.latlng.lng];
+      if (mode === 'regular' && rectStart) {
+        onRectMove(pos);
+      } else if (mode === 'irregular' && irregularPoints.length > 0) {
+        onIrregularMove(pos);
+      }
+    },
+    dblclick() {
+      if (mode === 'irregular') {
+        onIrregularDblClick();
+      }
+    }
+  });
+
+  return (
+    <>
+      {/* 1. Point / Pin Mode Marker */}
+      {mode === 'point' && !polygon && (
+        <Marker position={pointPosition} icon={customPinIcon} />
+      )}
+
+      {/* 2. Committed Polygon (Regular or Irregular) */}
+      {polygon && (
+        <>
+          <Polygon
+            positions={polygon}
+            pathOptions={{
+              color: '#DA291C',
+              weight: 2.5,
+              fillColor: '#DA291C',
+              fillOpacity: 0.22,
+            }}
+          />
+          {polygon.map((pt, idx) => (
+            <CircleMarker
+              key={idx}
+              center={pt}
+              radius={4}
+              pathOptions={{
+                color: '#DA291C',
+                fillColor: '#FFFFFF',
+                fillOpacity: 1,
+                weight: 2,
+              }}
+            />
+          ))}
+          {/* Centroid / Geometric Center Marker */}
+          {metrics && (
+            <Marker position={metrics.centroid} icon={centroidIcon} />
+          )}
+        </>
+      )}
+
+      {/* 3. Regular Rectangle in-progress */}
+      {mode === 'regular' && rectStart && rectCurrent && !polygon && (
+        <>
+          <Rectangle
+            bounds={[rectStart, rectCurrent]}
+            pathOptions={{
+              color: '#DA291C',
+              weight: 2,
+              dashArray: '6, 6',
+              fillColor: '#DA291C',
+              fillOpacity: 0.18,
+            }}
+          />
+          <CircleMarker
+            center={rectStart}
+            radius={5}
+            pathOptions={{ color: '#DA291C', fillColor: '#FFFFFF', fillOpacity: 1, weight: 2 }}
+          />
+          <CircleMarker
+            center={rectCurrent}
+            radius={4}
+            pathOptions={{ color: '#DA291C', fillColor: '#DA291C', fillOpacity: 1, weight: 1.5 }}
+          />
+        </>
+      )}
+
+      {/* 4. Irregular Polygon in-progress */}
+      {mode === 'irregular' && irregularPoints.length > 0 && !polygon && (
+        <>
+          {irregularPoints.length >= 2 && (
+            <Polyline
+              positions={irregularPoints}
+              pathOptions={{ color: '#DA291C', weight: 2 }}
+            />
+          )}
+
+          {/* Elastic line to current cursor position */}
+          {mousePos && irregularPoints.length > 0 && (
+            <Polyline
+              positions={[irregularPoints[irregularPoints.length - 1], mousePos]}
+              pathOptions={{ color: '#DA291C', weight: 2, dashArray: '4, 4' }}
+            />
+          )}
+
+          {/* Ghost closing line to first point */}
+          {mousePos && irregularPoints.length >= 2 && (
+            <Polyline
+              positions={[mousePos, irregularPoints[0]]}
+              pathOptions={{ color: '#DA291C66', weight: 1.5, dashArray: '2, 4' }}
+            />
+          )}
+
+          {/* Vertices */}
+          {irregularPoints.map((pt, i) => (
+            <CircleMarker
+              key={i}
+              center={pt}
+              radius={i === 0 ? 6 : 4}
+              pathOptions={{
+                color: '#DA291C',
+                fillColor: i === 0 ? '#DA291C' : '#FFFFFF',
+                fillOpacity: 1,
+                weight: 2,
+              }}
+            />
+          ))}
+        </>
+      )}
+    </>
+  );
+}
+
 export default function OsmImporter({ onDataFetched }: OsmImporterProps) {
   const [query, setQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
   const [position, setPosition] = useState<[number, number]>([-33.4489, -70.6693]); // Santiago de Chile
   const [center, setCenter] = useState<[number, number]>([-33.4489, -70.6693]);
   const [isExtracting, setIsExtracting] = useState(false);
+  const [extractionStatus, setExtractionStatus] = useState<string>('');
+  const [isExpanded, setIsExpanded] = useState(false);
 
-  const handleSearch = async () => {
-    if (!query) return;
+  // Polygon and Drawing State
+  const [selectionMode, setSelectionMode] = useState<SelectionMode>('regular');
+  const [polygon, setPolygon] = useState<[number, number][] | null>(null);
+  const [metrics, setMetrics] = useState<PolygonMetrics | null>(null);
+
+  // Regular drawing temp state
+  const [rectStart, setRectStart] = useState<[number, number] | null>(null);
+  const [rectCurrent, setRectCurrent] = useState<[number, number] | null>(null);
+
+  // Irregular drawing temp state
+  const [irregularPoints, setIrregularPoints] = useState<[number, number][]>([]);
+  const [mousePos, setMousePos] = useState<[number, number] | null>(null);
+
+  const resetDrawing = () => {
+    setRectStart(null);
+    setRectCurrent(null);
+    setIrregularPoints([]);
+    setMousePos(null);
+  };
+
+  const clearPolygon = () => {
+    setPolygon(null);
+    setMetrics(null);
+    resetDrawing();
+  };
+
+  const closeExpanded = () => {
+    resetDrawing();
+    setIsExpanded(false);
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isExpanded) {
+        closeExpanded();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isExpanded]);
+
+  // Search logic
+  const handleSearch = async (searchQuery = query) => {
+    if (!searchQuery) return;
     setIsSearching(true);
     try {
-      const resp = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`);
+      const resp = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchQuery)}`);
       const data = await resp.json();
       if (data && data.length > 0) {
         const lat = parseFloat(data[0].lat);
         const lon = parseFloat(data[0].lon);
         setCenter([lat, lon]);
         setPosition([lat, lon]);
+        clearPolygon();
       } else {
         alert("Lugar no encontrado.");
       }
@@ -68,19 +452,149 @@ export default function OsmImporter({ onDataFetched }: OsmImporterProps) {
     }
   };
 
+  // 1. Regular Rectangle click handler
+  const handleRectClick = (pos: [number, number]) => {
+    if (!rectStart) {
+      setPolygon(null);
+      setMetrics(null);
+      setRectStart(pos);
+      setRectCurrent(pos);
+    } else {
+      const minLat = Math.min(rectStart[0], pos[0]);
+      const maxLat = Math.max(rectStart[0], pos[0]);
+      const minLon = Math.min(rectStart[1], pos[1]);
+      const maxLon = Math.max(rectStart[1], pos[1]);
+
+      const poly: [number, number][] = [
+        [minLat, minLon],
+        [maxLat, minLon],
+        [maxLat, maxLon],
+        [minLat, maxLon],
+      ];
+
+      const m = calculatePolygonMetrics(poly, true);
+      setPolygon(poly);
+      setMetrics(m);
+      if (m) {
+        setPosition(m.centroid);
+        setCenter(m.centroid);
+      }
+      setRectStart(null);
+      setRectCurrent(null);
+    }
+  };
+
+  // 2. Irregular Polygon click handler
+  const handleIrregularClick = (pos: [number, number]) => {
+    if (irregularPoints.length >= 3) {
+      // Check if clicking near first point to close
+      const first = irregularPoints[0];
+      const dLat = Math.abs(pos[0] - first[0]);
+      const dLon = Math.abs(pos[1] - first[1]);
+      if (dLat < 0.0006 && dLon < 0.0006) {
+        finishIrregularPolygon();
+        return;
+      }
+    }
+
+    if (irregularPoints.length === 0) {
+      setPolygon(null);
+      setMetrics(null);
+    }
+    setIrregularPoints([...irregularPoints, pos]);
+  };
+
+  const finishIrregularPolygon = () => {
+    if (irregularPoints.length < 3) return;
+    const m = calculatePolygonMetrics(irregularPoints, false);
+    setPolygon(irregularPoints);
+    setMetrics(m);
+    if (m) {
+      setPosition(m.centroid);
+      setCenter(m.centroid);
+    }
+    setIrregularPoints([]);
+    setMousePos(null);
+  };
+
+  // Point Selection handler
+  const handlePointSelect = (pos: [number, number]) => {
+    setPosition(pos);
+    setCenter(pos);
+    clearPolygon();
+  };
+
+  // Live Metric computation while drawing
+  let liveWidth: number | undefined;
+  let liveHeight: number | undefined;
+  let liveArea = 0;
+  let livePerimeter = 0;
+
+  if (selectionMode === 'regular' && rectStart && rectCurrent) {
+    const minLat = Math.min(rectStart[0], rectCurrent[0]);
+    const maxLat = Math.max(rectStart[0], rectCurrent[0]);
+    const minLon = Math.min(rectStart[1], rectCurrent[1]);
+    const maxLon = Math.max(rectStart[1], rectCurrent[1]);
+    const tempPoly: [number, number][] = [
+      [minLat, minLon],
+      [maxLat, minLon],
+      [maxLat, maxLon],
+      [minLat, maxLon],
+    ];
+    const liveM = calculatePolygonMetrics(tempPoly, true);
+    if (liveM) {
+      liveWidth = liveM.widthM;
+      liveHeight = liveM.heightM;
+      liveArea = liveM.areaM2;
+      livePerimeter = liveM.perimeterM;
+    }
+  } else if (selectionMode === 'irregular' && irregularPoints.length > 0 && mousePos) {
+    const tempPoly = [...irregularPoints, mousePos];
+    const liveM = calculatePolygonMetrics(tempPoly, false);
+    if (liveM) {
+      liveArea = liveM.areaM2;
+      livePerimeter = liveM.perimeterM;
+    }
+  }
+
+  // Extract OSM Elevation and 3D Context
   const extractOsmData = async () => {
     setIsExtracting(true);
+    setExtractionStatus('Descargando topografía DEM...');
     try {
-      // Create a bounding box around the selected point (~1km)
-      const delta = 0.005; 
-      const minLat = position[0] - delta;
-      const maxLat = position[0] + delta;
-      const minLon = position[1] - delta;
-      const maxLon = position[1] + delta;
+      let minLat: number, maxLat: number, minLon: number, maxLon: number;
+
+      if (polygon && polygon.length >= 3) {
+        const lats = polygon.map(p => p[0]);
+        const lons = polygon.map(p => p[1]);
+        const polyMinLat = Math.min(...lats);
+        const polyMaxLat = Math.max(...lats);
+        const polyMinLon = Math.min(...lons);
+        const polyMaxLon = Math.max(...lons);
+
+        // Margen contextual del 18% para contexto topográfico
+        const latSpan = polyMaxLat - polyMinLat;
+        const lonSpan = polyMaxLon - polyMinLon;
+        const marginLat = Math.max(latSpan * 0.18, 0.001);
+        const marginLon = Math.max(lonSpan * 0.18, 0.001);
+
+        minLat = polyMinLat - marginLat;
+        maxLat = polyMaxLat + marginLat;
+        minLon = polyMinLon - marginLon;
+        maxLon = polyMaxLon + marginLon;
+      } else {
+        const delta = 0.005; 
+        minLat = position[0] - delta;
+        maxLat = position[0] + delta;
+        minLon = position[1] - delta;
+        maxLon = position[1] + delta;
+      }
       
       const z = 14; 
       const lon2tile = (lon: number, zoom: number) => (Math.floor((lon + 180) / 360 * Math.pow(2, zoom)));
       const lat2tile = (lat: number, zoom: number) => (Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom)));
+      const lon2tileFloat = (lon: number, zoom: number) => ((lon + 180) / 360 * Math.pow(2, zoom));
+      const lat2tileFloat = (lat: number, zoom: number) => ((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom));
       const tile2lon = (x: number, z: number) => (x / Math.pow(2, z) * 360 - 180);
       const tile2lat = (y: number, z: number) => {
         const n = Math.PI - 2 * Math.PI * y / Math.pow(2, z);
@@ -89,8 +603,8 @@ export default function OsmImporter({ onDataFetched }: OsmImporterProps) {
 
       const minTx = lon2tile(minLon, z);
       const maxTx = lon2tile(maxLon, z);
-      const minTy = lat2tile(maxLat, z); // maxLat is North, smaller Y
-      const maxTy = lat2tile(minLat, z); // minLat is South, larger Y
+      const minTy = lat2tile(maxLat, z);
+      const maxTy = lat2tile(minLat, z);
 
       const numX = maxTx - minTx + 1;
       const numY = maxTy - minTy + 1;
@@ -144,10 +658,8 @@ export default function OsmImporter({ onDataFetched }: OsmImporterProps) {
       };
 
       const getElevation = (lat: number, lon: number) => {
-        const x = ((lon - canvasWest) / (canvasEast - canvasWest)) * width;
-        // Invert Y: north is pixel 0, but maxLat is north. 
-        // canvasNorth > lat > canvasSouth. y = 0 at canvasNorth, y = height at canvasSouth.
-        const y = ((canvasNorth - lat) / (canvasNorth - canvasSouth)) * height;
+        const x = (lon2tileFloat(lon, z) - minTx) * 256;
+        const y = (lat2tileFloat(lat, z) - minTy) * 256;
         
         const x0 = Math.floor(x);
         const x1 = x0 + 1;
@@ -169,7 +681,7 @@ export default function OsmImporter({ onDataFetched }: OsmImporterProps) {
         return (1 - ty) * ((1 - tx) * v00 + tx * v10) + ty * ((1 - tx) * v01 + tx * v11);
       };
 
-      const steps = 150; // Output high-res directly!
+      const steps = 150;
       const results = [];
       for (let i = 0; i < steps; i++) {
          const lat = maxLat - (maxLat - minLat) * (i / (steps - 1));
@@ -184,21 +696,94 @@ export default function OsmImporter({ onDataFetched }: OsmImporterProps) {
       }
       
       let buildingsData = null;
+      setExtractionStatus('Consultando capas OSM (edificios y vialidad)...');
       try {
-        const overpassQuery = `[out:json];(way["building"](${minLat},${minLon},${maxLat},${maxLon});relation["building"](${minLat},${minLon},${maxLat},${maxLon});way["highway"](${minLat},${minLon},${maxLat},${maxLon});way["waterway"](${minLat},${minLon},${maxLat},${maxLon}););out geom;`;
-        const overpassResp = await fetch('https://overpass-api.de/api/interpreter', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            // Omit User-Agent in browser environments as it might be blocked or automatically added by the browser
-          },
-          body: 'data=' + encodeURIComponent(overpassQuery)
-        });
-        if (overpassResp.ok) {
-           buildingsData = await overpassResp.json();
+        const overpassQuery = `[out:json][timeout:30];
+(
+  way["building"](${minLat},${minLon},${maxLat},${maxLon});
+  relation["building"](${minLat},${minLon},${maxLat},${maxLon});
+  way["highway"](${minLat},${minLon},${maxLat},${maxLon});
+  way["waterway"](${minLat},${minLon},${maxLat},${maxLon});
+);
+out geom;`;
+
+        // 1. Intentar primero a través del proxy local de Vite (/api/overpass)
+        try {
+          const proxyResp = await fetch('/api/overpass', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'data=' + encodeURIComponent(overpassQuery),
+          });
+          if (proxyResp.ok) {
+            const data = await proxyResp.json();
+            if (data && Array.isArray(data.elements)) {
+              buildingsData = data;
+              console.log(`[GeoArc OSM] ${data.elements.length} elementos obtenidos vía proxy local /api/overpass`);
+            }
+          }
+        } catch (proxyErr) {
+          console.warn('[GeoArc OSM] Proxy local no disponible o falló:', proxyErr);
+        }
+
+        // 2. Si el proxy local no retornó datos, consultar mirrors públicos directos con CORS
+        if (!buildingsData) {
+          const directMirrors = [
+            'https://lz4.overpass-api.de/api/interpreter',
+            'https://overpass.kumi.systems/api/interpreter',
+            'https://overpass-api.de/api/interpreter',
+            'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+          ];
+
+          for (const mirrorUrl of directMirrors) {
+            try {
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 20000);
+              const mirrorResp = await fetch(mirrorUrl, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: 'data=' + encodeURIComponent(overpassQuery),
+                signal: controller.signal,
+              });
+              clearTimeout(timeoutId);
+
+              if (mirrorResp.ok) {
+                const data = await mirrorResp.json();
+                if (data && Array.isArray(data.elements)) {
+                  buildingsData = data;
+                  console.log(`[GeoArc OSM] ${data.elements.length} elementos obtenidos vía mirror directo: ${mirrorUrl}`);
+                  break;
+                }
+              }
+            } catch (mirrorErr) {
+              console.warn(`[GeoArc OSM] Mirror ${mirrorUrl} no respondió:`, mirrorErr);
+            }
+          }
+        }
+
+        if (buildingsData && Array.isArray(buildingsData.elements)) {
+          const bCount = buildingsData.elements.filter((e: any) => e.tags?.building).length;
+          const hCount = buildingsData.elements.filter((e: any) => e.tags?.highway).length;
+          const wCount = buildingsData.elements.filter((e: any) => e.tags?.waterway).length;
+          console.log(`[GeoArc OSM] Resumen de capas cargadas -> Edificios: ${bCount}, Vías: ${hCount}, Cursos de agua: ${wCount}`);
+        } else {
+          console.warn('[GeoArc OSM] No se pudieron cargar capas OSM de edificios ni vialidad desde ningún endpoint.');
         }
       } catch (e) {
-        console.warn('Failed to fetch building data', e);
+        console.warn('Error en consulta de capas Overpass OSM:', e);
+      }
+
+      // 3. Captura y mosaico de la vista satelital ortorrectificada de alta resolución
+      let satelliteResult: SatelliteResult | null = null;
+      try {
+        setExtractionStatus('Generando ortofoto satelital de alta resolución...');
+        satelliteResult = await fetchSatelliteOrthophoto({ minLat, maxLat, minLon, maxLon });
+        console.log(`[GeoArc Satelital] Ortofoto generada exitosamente: ${satelliteResult.width}x${satelliteResult.height}px (Zoom ${satelliteResult.zoom})`);
+      } catch (satErr) {
+        console.warn('[GeoArc Satelital] Error al generar ortofoto satelital:', satErr);
       }
 
       onDataFetched({ 
@@ -206,7 +791,9 @@ export default function OsmImporter({ onDataFetched }: OsmImporterProps) {
         topoData: { results }, 
         buildings: buildingsData,
         bbox: { minLat, maxLat, minLon, maxLon }, 
-        steps 
+        lotPolygon: polygon,
+        steps,
+        satellite: satelliteResult
       }, `Relieve_${position[0].toFixed(4)}_${position[1].toFixed(4)}.json`);
     } catch (e) {
       console.error(e);
@@ -218,25 +805,40 @@ export default function OsmImporter({ onDataFetched }: OsmImporterProps) {
 
   return (
     <div className="flex flex-col gap-4">
+      {/* Search Bar with Expand Trigger */}
       <div className="flex gap-2">
-        <input 
-          type="text"
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && handleSearch()}
-          placeholder="Buscar ciudad o dirección..."
-          className="flex-1 bg-bg-elevated border border-border-main text-xs p-2.5 rounded-sm outline-none text-text-main focus:border-accent transition-colors"
-        />
-        <button 
-          onClick={handleSearch}
-          disabled={isSearching}
-          className="bg-bg-elevated border border-border-main px-3 rounded-sm hover:border-accent transition-colors text-text-faded hover:text-accent"
+        <div 
+          onClick={() => setIsExpanded(true)}
+          className="flex-1 relative cursor-pointer group"
+          title="Haz clic para abrir el mapa y dibujar el terreno"
         >
-          {isSearching ? <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin"></div> : <Search size={16} />}
+          <input 
+            type="text"
+            value={query}
+            readOnly
+            placeholder="Buscar ciudad o dirección..."
+            className="w-full bg-bg-elevated border border-border-main text-xs p-2.5 pr-8 rounded-sm outline-none text-text-main group-hover:border-accent transition-colors cursor-pointer"
+          />
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); setIsExpanded(true); }}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-text-faded group-hover:text-accent transition-colors p-1"
+            title="Ampliar mapa"
+          >
+            <Maximize2 size={13} />
+          </button>
+        </div>
+        <button 
+          onClick={() => setIsExpanded(true)}
+          className="bg-bg-elevated border border-border-main px-3 rounded-sm hover:border-accent transition-colors text-text-faded hover:text-accent flex items-center justify-center cursor-pointer"
+          title="Ampliar mapa para dibujar terreno"
+        >
+          <Search size={15} />
         </button>
       </div>
 
-      <div className="h-[200px] w-full rounded-sm overflow-hidden border border-border-strong relative z-0">
+      {/* Mini-map in Sidebar */}
+      <div className="h-[165px] w-full rounded-sm overflow-hidden border border-border-strong relative z-0 group">
         <MapContainer center={center} zoom={13} style={{ height: '100%', width: '100%' }}>
           <LayersControl position="topright">
             <LayersControl.BaseLayer checked name="Standard">
@@ -253,27 +855,441 @@ export default function OsmImporter({ onDataFetched }: OsmImporterProps) {
               />
             </LayersControl.BaseLayer>
           </LayersControl>
-          <MapController center={center} />
-          <LocationSelector position={position} setPosition={setPosition} />
+          <SidebarMapSync center={center} />
+
+          {/* Render polygon & centroid in mini-map */}
+          {polygon ? (
+            <>
+              <Polygon
+                positions={polygon}
+                pathOptions={{
+                  color: '#DA291C',
+                  weight: 2,
+                  fillColor: '#DA291C',
+                  fillOpacity: 0.25,
+                }}
+              />
+              {metrics && (
+                <Marker position={metrics.centroid} icon={centroidIcon} />
+              )}
+            </>
+          ) : (
+            <Marker position={position} icon={customPinIcon} />
+          )}
         </MapContainer>
+
+        {/* Hover overlay inviting to expand */}
+        <div 
+          onClick={() => setIsExpanded(true)}
+          className="absolute inset-0 bg-black/0 hover:bg-black/35 transition-all flex items-center justify-center opacity-0 group-hover:opacity-100 cursor-pointer z-[400]"
+        >
+          <span className="bg-bg-surface/95 border border-accent/40 text-text-main text-[9px] uppercase font-bold tracking-widest px-3 py-1.5 rounded-sm shadow-xl flex items-center gap-1.5 group-hover:scale-105 transition-transform">
+            <Maximize2 size={11} className="text-accent" />
+            Ampliar y Delimitar Terreno
+          </span>
+        </div>
+
+        {/* Top-right corner expand button */}
+        <button
+          type="button"
+          onClick={() => setIsExpanded(true)}
+          className="absolute top-2 right-2 z-[450] bg-bg-surface/90 hover:bg-bg-surface border border-border-main hover:border-accent p-1.5 rounded-sm text-text-faded hover:text-accent shadow-md transition-colors cursor-pointer"
+          title="Ampliar mapa"
+        >
+          <Maximize2 size={12} />
+        </button>
       </div>
 
-      <div className="flex items-center justify-between text-[10px] uppercase font-mono tracking-widest text-text-subtle">
-        <span>Lat: {position[0].toFixed(5)}</span>
-        <span>Lon: {position[1].toFixed(5)}</span>
-      </div>
+      {/* Information readout in sidebar */}
+      {polygon && metrics ? (
+        <div className="bg-bg-elevated p-2.5 rounded-sm border border-border-main space-y-1.5">
+          <div className="flex justify-between items-center text-[10px] font-mono">
+            <span className="text-text-subtle uppercase">Área Terreno:</span>
+            <span className="text-accent font-bold">{formatArea(metrics.areaM2)}</span>
+          </div>
+          {metrics.widthM && metrics.heightM && (
+            <div className="flex justify-between items-center text-[10px] font-mono">
+              <span className="text-text-subtle uppercase">Dimensiones:</span>
+              <span className="text-text-main font-semibold">{Math.round(metrics.widthM)} m × {Math.round(metrics.heightM)} m</span>
+            </div>
+          )}
+          <div className="flex justify-between items-center text-[10px] font-mono">
+            <span className="text-text-subtle uppercase">Perímetro:</span>
+            <span className="text-text-main font-semibold">{formatDistance(metrics.perimeterM)}</span>
+          </div>
+          <div className="flex justify-between items-center text-[9px] font-mono text-text-subtle pt-1 border-t border-border-faded">
+            <span>Centroide:</span>
+            <span>{metrics.centroid[0].toFixed(5)}, {metrics.centroid[1].toFixed(5)}</span>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between text-[10px] uppercase font-mono tracking-widest text-text-subtle">
+          <span>Lat: {position[0].toFixed(5)}</span>
+          <span>Lon: {position[1].toFixed(5)}</span>
+        </div>
+      )}
 
+      {/* Extract Button */}
       <button 
         onClick={extractOsmData}
         disabled={isExtracting}
-        className="w-full py-2 border border-accent text-accent text-[10px] font-bold uppercase tracking-widest hover:bg-accent hover:text-white transition-colors rounded-sm flex items-center justify-center gap-2"
+        className="w-full py-2.5 border border-accent text-accent text-[10px] font-bold uppercase tracking-widest hover:bg-accent hover:text-white transition-colors rounded-sm flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
       >
         {isExtracting ? (
-          <><div className="w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin"></div> Extrayendo...</>
+          <><div className="w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin"></div> {extractionStatus || 'Extrayendo Terreno...'}</>
         ) : (
-          <><Download size={14} /> Extraer Área</>
+          <><Download size={14} /> Extraer Área de Terreno</>
         )}
       </button>
+
+      {/* Expanded Modal Overlay via Portal */}
+      {typeof document !== 'undefined' && createPortal(
+        <AnimatePresence>
+          {isExpanded && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.22 }}
+              className="fixed inset-0 z-[9999] bg-black/75 backdrop-blur-md flex items-center justify-center p-2 sm:p-5 md:p-6"
+              onClick={closeExpanded}
+            >
+              <motion.div
+                initial={{ opacity: 0, scale: 0.92, y: 15 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.92, y: 15 }}
+                transition={{ type: 'spring', damping: 26, stiffness: 300 }}
+                onClick={(e) => e.stopPropagation()}
+                className="relative w-full max-w-6xl h-[90vh] bg-bg-surface border border-border-strong rounded-lg shadow-2xl flex flex-col overflow-hidden text-text-main"
+              >
+                {/* 1. Modal Top Bar */}
+                <div className="h-12 border-b border-border-main flex items-center justify-between px-4 bg-bg-surface shrink-0">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-6 h-6 rounded-full bg-accent/10 border border-accent/20 flex items-center justify-center">
+                      <MapPin size={13} className="text-accent" />
+                    </div>
+                    <h3 className="text-xs font-bold tracking-widest uppercase text-text-main">
+                      Delimitación de Terreno
+                    </h3>
+                    <span className="hidden sm:inline-block text-[9px] uppercase font-bold tracking-wider text-accent bg-accent/10 border border-accent/20 px-2 py-0.5 rounded-sm">
+                      Modo Ampliado
+                    </span>
+                  </div>
+
+                  {/* Mode Selector Buttons in Header */}
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center bg-bg-elevated p-0.5 rounded-sm border border-border-main">
+                      <button
+                        type="button"
+                        onClick={() => { setSelectionMode('regular'); resetDrawing(); }}
+                        className={`px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider rounded-sm flex items-center gap-1.5 transition-colors cursor-pointer ${
+                          selectionMode === 'regular'
+                            ? 'bg-bg-surface text-accent shadow-sm border border-accent/20'
+                            : 'text-text-faded hover:text-text-main'
+                        }`}
+                        title="Dibujar polígono regular (rectángulo)"
+                      >
+                        <Square size={12} />
+                        <span className="hidden md:inline">Polígono Regular</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setSelectionMode('irregular'); resetDrawing(); }}
+                        className={`px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider rounded-sm flex items-center gap-1.5 transition-colors cursor-pointer ${
+                          selectionMode === 'irregular'
+                            ? 'bg-bg-surface text-accent shadow-sm border border-accent/20'
+                            : 'text-text-faded hover:text-text-main'
+                        }`}
+                        title="Dibujar polígono irregular libre"
+                      >
+                        <Shapes size={12} />
+                        <span className="hidden md:inline">Polígono Irregular</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setSelectionMode('point'); resetDrawing(); }}
+                        className={`px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider rounded-sm flex items-center gap-1.5 transition-colors cursor-pointer ${
+                          selectionMode === 'point'
+                            ? 'bg-bg-surface text-accent shadow-sm border border-accent/20'
+                            : 'text-text-faded hover:text-text-main'
+                        }`}
+                        title="Fijar pin de ubicación simple"
+                      >
+                        <MapPin size={12} />
+                        <span className="hidden md:inline">Punto</span>
+                      </button>
+                    </div>
+
+                    {/* Clear / Redraw button */}
+                    {(polygon || rectStart || irregularPoints.length > 0) && (
+                      <button
+                        type="button"
+                        onClick={clearPolygon}
+                        className="px-2.5 py-1 text-[10px] uppercase font-bold tracking-wider text-text-faded hover:text-accent border border-border-main hover:border-accent rounded-sm flex items-center gap-1 transition-colors cursor-pointer bg-bg-surface"
+                        title="Limpiar y redibujar polígono"
+                      >
+                        <Trash2 size={12} />
+                        <span className="hidden sm:inline">Limpiar</span>
+                      </button>
+                    )}
+
+                    <button
+                      onClick={closeExpanded}
+                      className="w-7 h-7 rounded-sm border border-border-main hover:border-accent text-text-faded hover:text-accent flex items-center justify-center transition-colors cursor-pointer ml-2"
+                      title="Cerrar ventana [Esc]"
+                    >
+                      <X size={15} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* 2. Modal Search Bar & Presets */}
+                <div className="p-3 border-b border-border-main bg-bg-elevated/40 flex flex-col sm:flex-row gap-3 shrink-0">
+                  <div className="flex-1 flex gap-2">
+                    <div className="relative flex-1">
+                      <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-faded pointer-events-none" />
+                      <input
+                        type="text"
+                        autoFocus
+                        value={query}
+                        onChange={e => setQuery(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && handleSearch()}
+                        placeholder="Buscar ciudad o dirección para centrar el mapa..."
+                        className="w-full bg-bg-surface border border-border-main pl-9 pr-3 py-1.5 text-xs rounded-sm outline-none text-text-main focus:border-accent transition-colors"
+                      />
+                    </div>
+                    <button
+                      onClick={() => handleSearch()}
+                      disabled={isSearching}
+                      className="px-3.5 py-1.5 bg-accent text-white text-[11px] font-bold uppercase tracking-wider rounded-sm hover:bg-accent-hover transition-colors flex items-center gap-1.5 shrink-0 disabled:opacity-50 cursor-pointer"
+                    >
+                      {isSearching ? <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Search size={13} />}
+                      <span>Buscar</span>
+                    </button>
+                  </div>
+
+                  {/* Quick City Presets */}
+                  <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-hide py-0.5">
+                    <span className="text-[9px] uppercase font-bold tracking-widest text-text-subtle mr-1 shrink-0">Rápido:</span>
+                    {[
+                      { name: 'Santiago', lat: -33.4489, lon: -70.6693 },
+                      { name: 'Concepción', lat: -36.8270, lon: -73.0503 },
+                      { name: 'Temuco', lat: -38.7359, lon: -72.5904 },
+                      { name: 'Valparaíso', lat: -33.0472, lon: -71.6127 },
+                      { name: 'Puerto Montt', lat: -41.4693, lon: -72.9424 },
+                    ].map(city => (
+                      <button
+                        key={city.name}
+                        onClick={() => {
+                          setCenter([city.lat, city.lon]);
+                          setPosition([city.lat, city.lon]);
+                          setQuery(city.name);
+                          clearPolygon();
+                        }}
+                        className="text-[10px] bg-bg-surface border border-border-main hover:border-accent px-2 py-1 rounded-sm text-text-faded hover:text-accent transition-colors whitespace-nowrap cursor-pointer"
+                      >
+                        {city.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 3. Expanded Leaflet Map Canvas */}
+                <div className="flex-1 w-full relative min-h-0 cursor-crosshair">
+                  <MapContainer center={center} zoom={14} style={{ height: '100%', width: '100%' }}>
+                    <LayersControl position="topright">
+                      <LayersControl.BaseLayer checked name="Estándar (OSM)">
+                        <TileLayer
+                          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
+                          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                        />
+                      </LayersControl.BaseLayer>
+                      <LayersControl.BaseLayer name="Topográfico (OpenTopoMap)">
+                        <TileLayer
+                          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> contributors, &copy; <a href="https://opentopomap.org">OpenTopoMap</a>'
+                          url="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png"
+                          maxZoom={17}
+                        />
+                      </LayersControl.BaseLayer>
+                    </LayersControl>
+                    <MapController center={center} />
+                    <MapDrawController
+                      mode={selectionMode}
+                      polygon={polygon}
+                      metrics={metrics}
+                      rectStart={rectStart}
+                      rectCurrent={rectCurrent}
+                      irregularPoints={irregularPoints}
+                      mousePos={mousePos}
+                      onPointSelect={handlePointSelect}
+                      onRectClick={handleRectClick}
+                      onRectMove={(p) => setRectCurrent(p)}
+                      onIrregularClick={handleIrregularClick}
+                      onIrregularMove={(p) => setMousePos(p)}
+                      onIrregularDblClick={finishIrregularPolygon}
+                      pointPosition={position}
+                    />
+                    <MapResizer />
+                  </MapContainer>
+
+                  {/* 4. Top Live Drawing HUD */}
+                  <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[500] pointer-events-auto">
+                    {/* A. Live Regular Drawing */}
+                    {selectionMode === 'regular' && rectStart && rectCurrent && !polygon && (
+                      <motion.div
+                        initial={{ opacity: 0, y: -10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="flex items-center gap-3 bg-bg-surface/95 backdrop-blur-md border border-accent/40 px-4 py-2 rounded-sm shadow-xl text-xs font-mono"
+                      >
+                        <div className="flex items-center gap-1.5 text-accent font-bold">
+                          <Ruler size={13} />
+                          <span>Dibujando</span>
+                        </div>
+                        <div className="w-[1px] h-3.5 bg-border-main" />
+                        {liveWidth && liveHeight && (
+                          <div>
+                            <span className="text-text-subtle text-[10px] uppercase mr-1">Dim:</span>
+                            <strong className="text-text-main">{Math.round(liveWidth)} m × {Math.round(liveHeight)} m</strong>
+                          </div>
+                        )}
+                        <div className="w-[1px] h-3.5 bg-border-main" />
+                        <div>
+                          <span className="text-text-subtle text-[10px] uppercase mr-1">Área:</span>
+                          <strong className="text-accent">{formatArea(liveArea)}</strong>
+                        </div>
+                        <div className="w-[1px] h-3.5 bg-border-main" />
+                        <span className="text-[10px] text-text-faded italic">Clic en esquina opuesta para fijar</span>
+                      </motion.div>
+                    )}
+
+                    {/* B. Live Irregular Drawing */}
+                    {selectionMode === 'irregular' && irregularPoints.length > 0 && !polygon && (
+                      <motion.div
+                        initial={{ opacity: 0, y: -10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="flex items-center gap-3 bg-bg-surface/95 backdrop-blur-md border border-accent/40 px-4 py-2 rounded-sm shadow-xl text-xs font-mono"
+                      >
+                        <div className="flex items-center gap-1.5 text-accent font-bold">
+                          <Shapes size={13} />
+                          <span>Vértices: {irregularPoints.length}</span>
+                        </div>
+                        {livePerimeter > 0 && (
+                          <>
+                            <div className="w-[1px] h-3.5 bg-border-main" />
+                            <div>
+                              <span className="text-text-subtle text-[10px] uppercase mr-1">Perímetro:</span>
+                              <strong className="text-text-main">{formatDistance(livePerimeter)}</strong>
+                            </div>
+                          </>
+                        )}
+                        {irregularPoints.length >= 2 && liveArea > 0 && (
+                          <>
+                            <div className="w-[1px] h-3.5 bg-border-main" />
+                            <div>
+                              <span className="text-text-subtle text-[10px] uppercase mr-1">Área:</span>
+                              <strong className="text-accent">{formatArea(liveArea)}</strong>
+                            </div>
+                          </>
+                        )}
+                        {irregularPoints.length >= 3 && (
+                          <button
+                            type="button"
+                            onClick={finishIrregularPolygon}
+                            className="ml-2 px-2.5 py-1 bg-accent text-white text-[10px] font-bold uppercase tracking-wider rounded-sm hover:bg-accent-hover transition-colors flex items-center gap-1 shadow-md cursor-pointer animate-pulse"
+                          >
+                            <CheckCircle2 size={12} />
+                            <span>Cerrar Polígono</span>
+                          </button>
+                        )}
+                      </motion.div>
+                    )}
+
+                    {/* C. Instruction Pill when not yet drawing */}
+                    {!polygon && !rectStart && irregularPoints.length === 0 && (
+                      <div className="bg-bg-surface/90 backdrop-blur-md border border-border-strong px-4 py-1.5 rounded-full shadow-lg text-[10px] uppercase tracking-wider font-semibold text-text-main flex items-center gap-2">
+                        {selectionMode === 'regular' && (
+                          <>
+                            <Square size={12} className="text-accent" />
+                            <span>Haz clic en una esquina y luego en la esquina opuesta para delimitar el terreno</span>
+                          </>
+                        )}
+                        {selectionMode === 'irregular' && (
+                          <>
+                            <Shapes size={12} className="text-accent" />
+                            <span>Haz clics sucesivos en el mapa para trazar los vértices del polígono</span>
+                          </>
+                        )}
+                        {selectionMode === 'point' && (
+                          <>
+                            <MapPin size={12} className="text-accent" />
+                            <span>Haz clic sobre el mapa para fijar el punto del terreno</span>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 5. Bottom Completed Metrics HUD */}
+                  {polygon && metrics && (
+                    <motion.div
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="absolute bottom-4 left-4 z-[500] bg-bg-surface/95 backdrop-blur-md border border-accent/40 p-3 rounded-sm shadow-2xl max-w-sm font-mono text-xs"
+                    >
+                      <div className="flex items-center justify-between border-b border-border-faded pb-1.5 mb-2">
+                        <span className="text-[10px] font-bold uppercase tracking-widest text-accent flex items-center gap-1.5">
+                          <Check size={13} />
+                          Terreno Delimitado ({selectionMode === 'regular' ? 'Regular' : 'Irregular'})
+                        </span>
+                        <button
+                          type="button"
+                          onClick={clearPolygon}
+                          className="text-[9px] uppercase tracking-wider text-text-subtle hover:text-accent transition-colors cursor-pointer"
+                        >
+                          Redibujar
+                        </button>
+                      </div>
+
+                      <div className="space-y-1">
+                        <div className="flex justify-between">
+                          <span className="text-text-subtle uppercase text-[10px]">Área Total:</span>
+                          <strong className="text-accent font-bold">{formatArea(metrics.areaM2)}</strong>
+                        </div>
+                        {metrics.widthM && metrics.heightM && (
+                          <div className="flex justify-between">
+                            <span className="text-text-subtle uppercase text-[10px]">Dimensiones:</span>
+                            <strong className="text-text-main">{Math.round(metrics.widthM)} m × {Math.round(metrics.heightM)} m</strong>
+                          </div>
+                        )}
+                        <div className="flex justify-between">
+                          <span className="text-text-subtle uppercase text-[10px]">Perímetro:</span>
+                          <strong className="text-text-main">{formatDistance(metrics.perimeterM)}</strong>
+                        </div>
+                        <div className="flex justify-between pt-1 border-t border-border-faded text-[10px] text-text-muted">
+                          <span className="uppercase text-[9px] text-text-subtle">Centroide:</span>
+                          <span>Lat: {metrics.centroid[0].toFixed(5)}, Lon: {metrics.centroid[1].toFixed(5)}</span>
+                        </div>
+                      </div>
+                    </motion.div>
+                  )}
+
+                  {/* 6. Confirm and Return Action */}
+                  <div className="absolute bottom-4 right-4 z-[500] flex gap-2">
+                    <button
+                      onClick={closeExpanded}
+                      className="bg-accent hover:bg-accent-hover text-white px-5 py-2.5 rounded-sm shadow-xl text-[10px] uppercase font-bold tracking-widest flex items-center gap-2 transition-all cursor-pointer"
+                    >
+                      <Check size={14} />
+                      <span>Confirmar Selección y Volver</span>
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body
+      )}
     </div>
   );
 }

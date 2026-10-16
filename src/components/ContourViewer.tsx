@@ -2,6 +2,8 @@ import React, { useMemo, useState, useRef, useEffect } from 'react';
 import * as d3 from 'd3';
 import { Map, Layers, ZoomIn, ZoomOut, Maximize, RotateCw, Download } from 'lucide-react';
 import { MeshData } from '../lib/meshProcessor';
+import { AnalysisMode } from '../App';
+import { getSunPosition } from '../lib/SunPosition';
 
 interface ContourViewerProps {
   interval: number;
@@ -12,11 +14,110 @@ interface ContourViewerProps {
   minVisibleElev?: number;
   maxVisibleElev?: number;
   masterIntervalCount?: number;
+  showContourLabels?: boolean;
+  analysisMode?: AnalysisMode;
+  locationLat?: number;
+  locationLon?: number;
+  ogucParams?: {
+    regionGroup: 1 | 2 | 3;
+    rasanteStartHeight: number;
+    minSetback: number;
+    applyExtraSetback: boolean;
+    maxHeight: number;
+    continuousBaseHeight: number;
+    showShadows: boolean;
+    angle: number; // For fallback until Module 2 is complete
+  };
+  solarParams?: {
+    date: Date;
+    time: number;
+    showSunPath: boolean;
+    showShadows: boolean;
+  };
+  layerVisibility?: {
+    buildings: boolean;
+    highways: boolean;
+    waterways: boolean;
+  };
+  isDrawingLot?: boolean;
+  setIsDrawingLot?: (val: boolean) => void;
+  customLotPts?: {x: number, y: number, elev: number}[] | null;
+  setCustomLotPts?: (pts: {x: number, y: number, elev: number}[] | null) => void;
+}
+
+const insetPolygonBisector = (pts: {x: number, y: number}[], offsetMeters: number, meshData: any, n: number) => {
+    if (pts.length < 3) return pts;
+    
+    let area = 0;
+    for (let i = 0; i < pts.length; i++) {
+        let j = (i + 1) % pts.length;
+        area += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
+    }
+    const isClockwise = area > 0;
+    const sign = isClockwise ? 1 : -1;
+
+    const offsetGrid = meshData && n > 0 ? offsetMeters * (n / meshData.w) : offsetMeters;
+    
+    const newPts = [];
+    for (let i = 0; i < pts.length; i++) {
+        const prev = pts[(i - 1 + pts.length) % pts.length];
+        const curr = pts[i];
+        const next = pts[(i + 1) % pts.length];
+
+        let v1x = curr.x - prev.x;
+        let v1y = curr.y - prev.y;
+        const len1 = Math.hypot(v1x, v1y);
+        v1x /= len1; v1y /= len1;
+
+        let v2x = next.x - curr.x;
+        let v2y = next.y - curr.y;
+        const len2 = Math.hypot(v2x, v2y);
+        v2x /= len2; v2y /= len2;
+
+        const n1x = -v1y * sign;
+        const n1y = v1x * sign;
+        
+        const n2x = -v2y * sign;
+        const n2y = v2x * sign;
+
+        let bx = n1x + n2x;
+        let by = n1y + n2y;
+        const blen = Math.hypot(bx, by);
+        
+        if (blen < 0.0001) {
+            bx = n1x; by = n1y;
+        } else {
+            bx /= blen; by /= blen;
+        }
+
+        const dot = n1x * bx + n1y * by;
+        const dist = Math.abs(dot) > 0.05 ? offsetGrid / dot : offsetGrid;
+
+        newPts.push({
+            x: curr.x + bx * dist,
+            y: curr.y + by * dist,
+        });
+    }
+    
+    let newArea = 0;
+    for (let i = 0; i < newPts.length; i++) {
+        let j = (i + 1) % newPts.length;
+        newArea += newPts[i].x * newPts[j].y - newPts[j].x * newPts[i].y;
+    }
+    if ((isClockwise && newArea <= 0) || (!isClockwise && newArea >= 0)) {
+        return null;
+    }
+    
+    return newPts;
 }
 
 export default function ContourViewer({
   interval, fileName, meshData, zExaggeration = 1.0,
-  colorPalette = 'tecnico', minVisibleElev, maxVisibleElev, masterIntervalCount = 5
+  colorPalette = 'tecnico', minVisibleElev, maxVisibleElev, masterIntervalCount = 5,
+  showContourLabels = true,
+  analysisMode = 'topographic', locationLat = -38.7359, locationLon = -72.5904,
+  ogucParams, solarParams, layerVisibility = { buildings: true, highways: true, waterways: true },
+  isDrawingLot = false, setIsDrawingLot, customLotPts, setCustomLotPts
 }: ContourViewerProps) {
   const [viewMode, setViewMode] = useState<'plan' | 'perspective'>('plan');
   const isPerspective = viewMode === 'perspective';
@@ -26,8 +127,17 @@ export default function ContourViewer({
   const zoomBehavior = useRef<d3.ZoomBehavior<SVGSVGElement, unknown> | null>(null);
 
   const [rotation, setRotation] = useState({ x: 60, z: 45 });
+  const [drawingCursor, setDrawingCursor] = useState<{x: number, y: number} | null>(null);
   const [isAutoOrbit, setIsAutoOrbit] = useState(false);
   const [isDraggingSlider, setIsDraggingSlider] = useState(false);
+  const [zoomK, setZoomK] = useState(1);
+  const [showSatelliteInPlan, setShowSatelliteInPlan] = useState<boolean>(true);
+  const [satelliteOpacity, setSatelliteOpacity] = useState<number>(0.85);
+
+  // Estados para el arrastre del volumen (Etapa 1)
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const isDraggingVolumeRef = useRef(false);
+  const dragStartRef = useRef({ cx: 0, cy: 0, ox: 0, oy: 0 });
 
   useEffect(() => {
     let animationFrameId: number;
@@ -58,7 +168,7 @@ export default function ContourViewer({
     let values: number[];
     let thresholds: number[];
 
-    const safeInterval = Math.max(0.1, interval);
+    const safeInterval = Math.max(0.05, interval);
 
     if (meshData) {
       // Usar los datos pre-procesados de ThreeJS
@@ -73,12 +183,12 @@ export default function ContourViewer({
         const delta = maxEv - minEv;
         let actualInterval = safeInterval;
 
-        // Auto-escalamiento: Si el intervalo del usuario es muy grande para la malla (ej. malla es 0.5 de alto pero intervalo es 1m)
-        // o muy pequeña (malla 1000 de alto, intervalo 0.1, generaría 10000 curvas), lo ajustamos.
-        if (delta / actualInterval > 120) {
-          actualInterval = delta / 120; // Máximo 120 curvas de nivel funcionales
-        } else if (delta / actualInterval < 5) {
-          actualInterval = delta / 25; // Forzar al menos 25 curvas para apreciación estética si es muy plana
+        // Auto-escalamiento: Si generaría demasiadas curvas (> 180), ajustamos por rendimiento.
+        // Si el relieve total es menor al intervalo seleccionado, subdividimos para no dejar el mapa vacío.
+        if (delta / actualInterval > 180) {
+          actualInterval = delta / 180;
+        } else if (delta < actualInterval && delta > 0.05) {
+          actualInterval = delta / 8;
         }
 
         thresholds = d3.range(minEv, maxEv + (actualInterval * 0.1), actualInterval);
@@ -243,7 +353,7 @@ export default function ContourViewer({
               const x = ((clampedLon - minLon) / widthSpan) * (n - 1);
               const y = ((maxLat - clampedLat) / heightSpan) * (m - 1);
               const elev = getElevAt(clampedLon, clampedLat);
-              pts.push({ x, y, elev });
+              pts.push({ x, y, elev: elev + 0.08 });
             }
           }
           if (pts.length > 0) {
@@ -265,6 +375,31 @@ export default function ContourViewer({
 
               if (el.tags.width) width = parseFloat(el.tags.width) * 0.3 || width;
               waterways.push({ pts, type: wType, width });
+            }
+          }
+        }
+      } else if (el.type === 'relation' && el.tags?.building && Array.isArray(el.members)) {
+        let height = 4;
+        if (el.tags?.height) {
+          height = parseFloat(el.tags.height) || 4;
+        } else if (el.tags?.['building:levels']) {
+          height = (parseFloat(el.tags['building:levels']) || 1) * 3.5;
+        }
+
+        for (const member of el.members) {
+          if (member.role === 'outer' && Array.isArray(member.geometry) && member.geometry.length > 2) {
+            const pts = [];
+            for (let i = 0; i < member.geometry.length; i++) {
+              const pt = member.geometry[i];
+              const clampedLon = Math.max(minLon, Math.min(maxLon, pt.lon));
+              const clampedLat = Math.max(minLat, Math.min(maxLat, pt.lat));
+              const x = ((clampedLon - minLon) / widthSpan) * (n - 1);
+              const y = ((maxLat - clampedLat) / heightSpan) * (m - 1);
+              const elev = getElevAt(clampedLon, clampedLat);
+              pts.push({ x, y, elev: elev + 0.05 });
+            }
+            if (pts.length >= 3) {
+              buildings.push({ pts, height });
             }
           }
         }
@@ -370,6 +505,325 @@ export default function ContourViewer({
       Y: b * x + d * y + f
     };
   };
+  const sunPosition = useMemo(() => {
+    if (analysisMode !== 'solar' || !solarParams) return null;
+    const date = new Date(solarParams.date);
+    return getSunPosition(locationLat, locationLon, date, solarParams.time);
+  }, [analysisMode, solarParams, locationLat, locationLon]);
+
+  const perspectiveHeliodonRadius = useMemo(() => {
+    const baseRadius = Math.sqrt(n * n + m * m) / 2 * 1.4;
+    return Math.min(baseRadius, 350 / Math.max(0.1, zoomK));
+  }, [n, m, zoomK]);
+
+  const sunPaths = useMemo(() => {
+    if (analysisMode !== 'solar' || !solarParams?.showSunPath) return null;
+    const dates = [
+      { date: new Date('2024-12-21T12:00:00'), color: '#f87171', label: 'Verano (Dic)' },
+      { date: new Date('2024-03-21T12:00:00'), color: '#fbbf24', label: 'Equinoccio' },
+      { date: new Date('2024-06-21T12:00:00'), color: '#60a5fa', label: 'Invierno (Jun)' },
+    ];
+
+    if (!isPerspective) {
+      // PLANTA: HUD 2D
+      const rPx = 140;
+      return dates.map(d => {
+        const pts = [];
+        for (let h = 5; h <= 21; h += 0.5) {
+          const pos = getSunPosition(locationLat, locationLon, d.date, h);
+          if (pos.elevation > -2) {
+            const elRad = pos.elevation * (Math.PI / 180);
+            const azRad = pos.azimuth * (Math.PI / 180);
+            const r = rPx * Math.cos(elRad);
+            pts.push({ x: r * Math.sin(azRad), y: -r * Math.cos(azRad), elev: 0 });
+          }
+        }
+        return { ...d, pts };
+      });
+    }
+
+    // PERSPECTIVA: Mundo 3D
+    const cx = n / 2;
+    const cy = m / 2;
+    const radius = perspectiveHeliodonRadius;
+
+    return dates.map(d => {
+      const pts = [];
+      for (let h = 5; h <= 21; h += 0.5) {
+        const pos = getSunPosition(locationLat, locationLon, d.date, h);
+        if (pos.elevation > -2) {
+          const elevRad = pos.elevation * Math.PI / 180;
+          const aziRad = pos.azimuth * Math.PI / 180;
+
+          const dirX = Math.sin(aziRad) * Math.cos(elevRad);
+          const dirY = Math.cos(aziRad) * Math.cos(elevRad);
+          const dirZ = Math.sin(elevRad);
+
+          const sx = cx + dirX * radius;
+          const sy = cy - dirY * radius;
+          const sz = (meshData?.minEv || 0) + (dirZ * radius) / zScale;
+          pts.push({ x: sx, y: sy, elev: sz });
+        }
+      }
+      return { ...d, pts };
+    });
+  }, [analysisMode, solarParams?.showSunPath, locationLat, locationLon, n, m, meshData, zScale, isPerspective, perspectiveHeliodonRadius]);
+
+  const currentSunPos = useMemo(() => {
+    if (analysisMode !== 'solar' || !solarParams?.showSunPath || !sunPosition) return null;
+    const elevRad = sunPosition.elevation * Math.PI / 180;
+    const aziRad = sunPosition.azimuth * Math.PI / 180;
+
+    if (!isPerspective) {
+      const rPx = 140;
+      const r = rPx * Math.cos(elevRad);
+      return { x: r * Math.sin(aziRad), y: -r * Math.cos(aziRad), elev: 0, dirX: 0, dirY: 0, dirZ: 0 };
+    }
+
+    const cx = n / 2;
+    const cy = m / 2;
+    const radius = perspectiveHeliodonRadius;
+
+    const dirX = Math.sin(aziRad) * Math.cos(elevRad);
+    const dirY = Math.cos(aziRad) * Math.cos(elevRad);
+    const dirZ = Math.sin(elevRad);
+
+    const sx = cx + dirX * radius;
+    const sy = cy - dirY * radius;
+    const sz = (meshData?.minEv || 0) + (dirZ * radius) / zScale;
+    return { x: sx, y: sy, elev: sz, dirX, dirY, dirZ };
+  }, [analysisMode, solarParams, sunPosition, n, m, meshData, zScale, isPerspective, perspectiveHeliodonRadius]);
+
+  const heliodonGuides = useMemo(() => {
+    if (analysisMode !== 'solar' || !solarParams?.showSunPath) return null;
+
+    if (!isPerspective) {
+      const rPx = 140;
+      const horizonPts = [];
+      for (let a = 0; a <= 360; a += 5) {
+        const rad = a * Math.PI / 180;
+        horizonPts.push({ x: Math.sin(rad) * rPx, y: -Math.cos(rad) * rPx, elev: 0 });
+      }
+      const elevLines = [30, 60].map(elev => {
+        const elRad = elev * Math.PI / 180;
+        const rCurrent = rPx * Math.cos(elRad);
+        const pts = [];
+        for (let a = 0; a <= 360; a += 5) {
+          const azRad = a * Math.PI / 180;
+          pts.push({ x: Math.sin(azRad) * rCurrent, y: -Math.cos(azRad) * rCurrent, elev: 0 });
+        }
+        return pts;
+      });
+      const northLine = [{ x: 0, y: -rPx, elev: 0 }, { x: 0, y: 0, elev: 0 }];
+      const cardinals = [
+        { label: 'N', x: 0, y: -rPx - 10, elev: 0 },
+        { label: 'E', x: rPx + 10, y: 0, elev: 0 },
+        { label: 'S', x: 0, y: rPx + 10, elev: 0 },
+        { label: 'O', x: -rPx - 10, y: 0, elev: 0 }
+      ];
+      return { horizonPts, elevLines, northLine, cardinals };
+    }
+
+    const cx = n / 2;
+    const cy = m / 2;
+    const R = perspectiveHeliodonRadius;
+    const baseElev = meshData?.minEv || 0;
+
+    const horizonPts = [];
+    for (let a = 0; a <= 360; a += 5) {
+      const rad = a * Math.PI / 180;
+      horizonPts.push({ x: cx + Math.sin(rad) * R, y: cy - Math.cos(rad) * R, elev: baseElev });
+    }
+
+    const elevLines = [30, 60].map(elev => {
+      const elRad = elev * Math.PI / 180;
+      const rCurrent = R * Math.cos(elRad);
+      const zCurrent = baseElev + (Math.sin(elRad) * R) / zScale;
+      const pts = [];
+      for (let a = 0; a <= 360; a += 5) {
+        const azRad = a * Math.PI / 180;
+        pts.push({ x: cx + Math.sin(azRad) * rCurrent, y: cy - Math.cos(azRad) * rCurrent, elev: zCurrent });
+      }
+      return pts;
+    });
+
+    const northLine = [];
+    for (let el = 0; el <= 90; el += 5) {
+      const elRad = el * Math.PI / 180;
+      northLine.push({ x: cx, y: cy - Math.cos(elRad) * R, elev: baseElev + (Math.sin(elRad) * R) / zScale });
+    }
+
+    const cardinals = [
+      { label: 'N', x: cx, y: cy - R },
+      { label: 'E', x: cx + R, y: cy },
+      { label: 'S', x: cx, y: cy + R },
+      { label: 'O', x: cx - R, y: cy }
+    ].map(c => ({ ...c, elev: baseElev }));
+
+    return { horizonPts, elevLines, northLine, cardinals };
+  }, [analysisMode, solarParams?.showSunPath, n, m, meshData, zScale, isPerspective, perspectiveHeliodonRadius]);
+
+  const getGridElevAt = (x: number, y: number) => {
+    if (!meshData) return 0;
+    const grid = meshData.grid;
+    const x0 = Math.max(0, Math.min(n - 1, Math.floor(x)));
+    const y0 = Math.max(0, Math.min(m - 1, Math.floor(y)));
+    const x1 = Math.min(x0 + 1, n - 1);
+    const y1 = Math.min(y0 + 1, m - 1);
+    const dx = x - x0;
+    const dy = y - y0;
+    
+    const v00 = grid[y0 * n + x0] ?? meshData.minEv;
+    const v10 = grid[y0 * n + x1] ?? v00;
+    const v01 = grid[y1 * n + x0] ?? v00;
+    const v11 = grid[y1 * n + x1] ?? v01;
+    
+    return v00 * (1 - dx) * (1 - dy) + v10 * dx * (1 - dy) + v01 * (1 - dx) * dy + v11 * dx * dy;
+  };
+
+  const lotPolygon = useMemo(() => {
+    if (analysisMode !== 'oguc' || !ogucParams) return null;
+    if (!customLotPts || customLotPts.length < 3) return null;
+    
+    return customLotPts.map(p => ({
+      x: p.x,
+      y: p.y,
+      elev: getGridElevAt(p.x, p.y)
+    }));
+  }, [n, m, analysisMode, ogucParams, meshData, dragOffset, customLotPts]);
+
+  const projectVolume = useMemo(() => {
+    if (analysisMode !== 'oguc' || !ogucParams) return null;
+    if (!customLotPts || customLotPts.length < 3) return null;
+    
+    const inset = insetPolygonBisector(customLotPts, ogucParams.minSetback, meshData, n);
+    console.log('inset result:', inset, 'minSetback:', ogucParams.minSetback);
+    if (!inset) return { pts: [], height: 0, collapsed: true };
+    
+    const pts = inset.map(p => ({
+      x: p.x,
+      y: p.y,
+      elev: getGridElevAt(p.x, p.y) ?? (meshData?.minEv || 0)
+    }));
+    const calcHeight = ogucParams.minSetback * Math.tan(ogucParams.angle * Math.PI / 180);
+    const height = Math.min(calcHeight, ogucParams.maxHeight);
+    
+    return { pts, height, collapsed: false };
+  }, [n, m, analysisMode, ogucParams, meshData, dragOffset, customLotPts]);
+
+  // ConvHull helper for shadows
+  const convexHull = (points: { x: number, y: number, elev: number }[]) => {
+    if (points.length <= 3) return points;
+    const pts = [...points].sort((a, b) => a.x === b.x ? a.y - b.y : a.x - b.x);
+    const cross = (o: any, a: any, b: any) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    const lower = [];
+    for (let i = 0; i < pts.length; i++) {
+      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], pts[i]) <= 0) lower.pop();
+      lower.push(pts[i]);
+    }
+    const upper = [];
+    for (let i = pts.length - 1; i >= 0; i--) {
+      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], pts[i]) <= 0) upper.pop();
+      upper.push(pts[i]);
+    }
+    upper.pop(); lower.pop();
+    return lower.concat(upper);
+  };
+
+  const getSolarShadowPolygon = (pts: { x: number, y: number, elev: number }[], height: number) => {
+    if (!sunPosition || sunPosition.elevation <= 0.5) return null; // Solo dibuja si está sobre el horizonte
+    const elevRad = sunPosition.elevation * Math.PI / 180;
+    const aziRad = sunPosition.azimuth * Math.PI / 180;
+
+    const projectedPts = pts.map(p => {
+      const startZ = p.elev + height;
+      
+      // Vector direccional de la sombra en el mundo físico (unidad 1m)
+      const realDx = -Math.sin(aziRad);
+      const realDy = Math.cos(aziRad);
+
+      // Convertir a unidades de grilla (map units)
+      const rawMapDx = meshData ? (realDx / meshData.w) * n : realDx;
+      const rawMapDy = meshData ? (realDy / meshData.h) * m : realDy;
+
+      // Normalizar para que el paso (step) avance exactamente ~0.5 celdas de la grilla 
+      // (mayor precisión en la intersección con el relieve)
+      const len = Math.sqrt(rawMapDx * rawMapDx + rawMapDy * rawMapDy) || 1;
+      const stepX = (rawMapDx / len) * 0.5;
+      const stepY = (rawMapDy / len) * 0.5;
+
+      // Distancia real de cada paso
+      const realStepDx = meshData ? (stepX / n) * meshData.w : stepX;
+      const realStepDy = meshData ? (stepY / m) * meshData.h : stepY;
+      const stepDistReal = Math.sqrt(realStepDx * realStepDx + realStepDy * realStepDy);
+      
+      // Caída altimétrica por cada paso
+      const stepZ = -stepDistReal * Math.tan(elevRad);
+
+      let currX = p.x;
+      let currY = p.y;
+      let currZ = startZ;
+
+      // Raymarching: Avanzar el rayo solar hasta que choque con el DEM
+      for (let steps = 0; steps < 2000; steps++) {
+        currX += stepX;
+        currY += stepY;
+        currZ += stepZ;
+
+        if (currX < 0 || currX >= n || currY < 0 || currY >= m) {
+          currZ = meshData?.minEv || 0; // Cae al plano base si sale del mapa
+          break;
+        }
+
+        const groundZ = getGridElevAt(currX, currY);
+        if (currZ <= groundZ) {
+          currZ = groundZ; // Intersección confirmada
+          break;
+        }
+      }
+
+      return { x: currX, y: currY, elev: currZ };
+    });
+
+    const allPts = [...pts.map(p => ({ ...p, elev: p.elev })), ...projectedPts];
+    return convexHull(allPts);
+  };
+
+  const getOgucShadowPolygon = (pts: { x: number, y: number, elev: number }[], height: number, angleDeg: number, orientation: number) => {
+    const angleRad = angleDeg * Math.PI / 180;
+    const Vz = Math.tan(angleRad);
+    const Vx = Math.sin(orientation * Math.PI / 180);
+    const Vy = -Math.cos(orientation * Math.PI / 180);
+
+    const projectedPts = pts.map(p => {
+      const z0 = meshData?.minEv || 0;
+      const dz = (p.elev + height) - z0;
+      const t = dz / Vz;
+      const realDx = Vx * t;
+      const realDy = Vy * t;
+      const mapDx = meshData ? (realDx / meshData.w) * n : realDx;
+      const mapDy = meshData ? (realDy / meshData.h) * m : realDy;
+      return { x: p.x + mapDx, y: p.y + mapDy, elev: z0 };
+    });
+
+    const allPts = [...pts.map(p => ({ ...p, elev: meshData?.minEv || 0 })), ...projectedPts];
+    return convexHull(allPts);
+  };
+
+  const polygonArea = (pts: { x: number, y: number }[]) => {
+    if (!pts || pts.length < 3) return 0;
+    let area = 0;
+    const w = meshData?.w || 100;
+    const h = meshData?.h || 100;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      const x1 = (pts[i].x / n) * w;
+      const y1 = (pts[i].y / m) * h;
+      const x2 = (pts[j].x / n) * w;
+      const y2 = (pts[j].y / m) * h;
+      area += (x2 + x1) * (y2 - y1);
+    }
+    return Math.abs(area / 2);
+  };
 
   const render3DPath = (pts: { x: number, y: number, elev: number }[], close: boolean = false) => {
     if (pts.length === 0) return "";
@@ -395,8 +849,10 @@ export default function ContourViewer({
     const g = d3.select(zoomGroupRef.current);
 
     zoomBehavior.current = d3.zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.3, 5])
+      .scaleExtent([0.3, 40])
       .filter((event) => {
+        if (isDrawingLot) return false;
+        
         // En perspectiva: Left-click queda libre para rotar. Paneo se mueve a click derecho/central.
         if (viewModeRef.current === 'perspective') {
           if (event.type === 'wheel') return true;
@@ -409,13 +865,14 @@ export default function ContourViewer({
       })
       .on("zoom", (event) => {
         g.attr("transform", event.transform.toString());
+        setZoomK(event.transform.k);
       });
 
     svg.call(zoomBehavior.current).on("contextmenu", (e) => {
       // Bloquear menú contextual de clic derecho para que sirva para pan en perspectiva
       e.preventDefault();
     });
-  }, []);
+  }, [isDrawingLot]);
 
   // Control manual de órbita via arrastre (Perspective Mode)
   const isDraggingOrbitRef = useRef(false);
@@ -475,13 +932,33 @@ export default function ContourViewer({
   const handleExportDXF = () => {
     if (!contours) return;
 
-    let dxf = "0\nSECTION\n2\nENTITIES\n";
+    // AutoCAD DXF Header: specifies AC1015 (AutoCAD 2000), INSUNITS 6 (Meters), MEASUREMENT 1 (Metric)
+    const headerLines = [
+      "0", "SECTION",
+      "2", "HEADER",
+      "9", "$ACADVER",
+      "1", "AC1015",
+      "9", "$HANDSEED",
+      "5", "FFFF",
+      "9", "$MEASUREMENT",
+      "70", "1", // 1 = Metric
+      "9", "$INSUNITS",
+      "70", "6", // 6 = Meters (0=Unitless, 1=Inches, 2=Feet, 4=mm, 5=cm, 6=Meters)
+      "9", "$LUNITS",
+      "70", "2", // 2 = Decimal
+      "0", "ENDSEC",
+      "0", "SECTION",
+      "2", "ENTITIES\n"
+    ];
+
+    let dxf = headerLines.join("\n");
+
     contours.forEach(c => {
       const z = c.value;
       const lines = c.type === 'MultiLineString' ? c.coordinates : (c.coordinates as any).flat();
 
       lines.forEach((line: any) => {
-        dxf += "0\nPOLYLINE\n8\nContours\n66\n1\n70\n8\n10\n0.0\n20\n0.0\n30\n" + z + "\n";
+        dxf += "0\nPOLYLINE\n8\nContours\n66\n1\n70\n8\n10\n0.0\n20\n0.0\n30\n" + z.toFixed(3) + "\n";
         line.forEach((pt: number[]) => {
           let realX = pt[0];
           let realY = pt[1];
@@ -491,7 +968,7 @@ export default function ContourViewer({
             realY = (1.0 - (pt[1] / m)) * meshData.h;
           }
 
-          dxf += "0\nVERTEX\n8\nContours\n70\n32\n10\n" + realX + "\n20\n" + realY + "\n30\n" + z + "\n";
+          dxf += "0\nVERTEX\n8\nContours\n70\n32\n10\n" + realX.toFixed(3) + "\n20\n" + realY.toFixed(3) + "\n30\n" + z.toFixed(3) + "\n";
         });
         dxf += "0\nSEQEND\n";
       });
@@ -532,7 +1009,7 @@ export default function ContourViewer({
             const x = ((clampedLon - minLon) / widthSpan) * meshData.w;
             const y = ((clampedLat - minLat) / heightSpan) * meshData.h; // True Y Cartesian mapping vs SVG
             const z = getElevAt(clampedLon, clampedLat);
-            dxf += "0\nVERTEX\n8\n" + layerName + "\n70\n32\n10\n" + x + "\n20\n" + y + "\n30\n" + z + "\n";
+            dxf += "0\nVERTEX\n8\n" + layerName + "\n70\n32\n10\n" + x.toFixed(3) + "\n20\n" + y.toFixed(3) + "\n30\n" + z.toFixed(3) + "\n";
           });
           dxf += "0\nSEQEND\n";
         }
@@ -660,7 +1137,7 @@ export default function ContourViewer({
 
     // STL result es un DataView si usamos binary: true
     const dataView = result as any as DataView;
-    const blob = new Blob([dataView.buffer], { type: 'application/octet-stream' });
+    const blob = new Blob([dataView.buffer as ArrayBuffer], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -677,19 +1154,45 @@ export default function ContourViewer({
 
       {/* HUD UI Top Left: View Mode */}
       <div className="absolute top-4 left-4 z-20 pointer-events-auto">
-        <div className="flex bg-bg-surface p-1 rounded-sm border border-border-main shadow-lg transition-colors duration-300">
+        <div className="flex bg-bg-surface p-1 rounded-sm border border-border-main shadow-lg transition-colors duration-300 items-center">
           <button
             onClick={() => setViewMode('plan')}
-            className={`flex items-center gap-1.5 px-4 py-2.5 rounded-sm transition-colors text-[10px] font-bold uppercase tracking-widest ${!isPerspective ? 'bg-bg-elevated text-accent' : 'text-text-faded hover:text-text-main'}`}
+            className={`flex items-center gap-1.5 px-4 py-2 rounded-sm transition-colors text-[10px] font-bold uppercase tracking-widest cursor-pointer ${!isPerspective ? 'bg-bg-elevated text-accent' : 'text-text-faded hover:text-text-main'}`}
           >
             <Map size={14} /> Planta
           </button>
           <button
             onClick={() => setViewMode('perspective')}
-            className={`flex items-center gap-1.5 px-4 py-2.5 rounded-sm transition-colors text-[10px] font-bold uppercase tracking-widest ${isPerspective ? 'bg-bg-elevated text-accent' : 'text-text-faded hover:text-text-main'}`}
+            className={`flex items-center gap-1.5 px-4 py-2 rounded-sm transition-colors text-[10px] font-bold uppercase tracking-widest cursor-pointer ${isPerspective ? 'bg-bg-elevated text-accent' : 'text-text-faded hover:text-text-main'}`}
           >
             <Layers size={14} /> Perspectiva
           </button>
+
+          {!isPerspective && meshData?.satelliteTexture && (
+            <div className="flex items-center gap-2 pl-3 border-l border-border-main text-[9px] font-mono text-text-faded ml-2">
+              <label className="flex items-center gap-1.5 cursor-pointer text-text-main">
+                <input
+                  type="checkbox"
+                  checked={showSatelliteInPlan}
+                  onChange={(e) => setShowSatelliteInPlan(e.target.checked)}
+                  className="accent-accent w-3 h-3 cursor-pointer"
+                />
+                <span className="uppercase tracking-wider font-semibold">Foto Satelital</span>
+              </label>
+              {showSatelliteInPlan && (
+                <input
+                  type="range"
+                  min="0.1"
+                  max="1"
+                  step="0.05"
+                  value={satelliteOpacity}
+                  onChange={(e) => setSatelliteOpacity(parseFloat(e.target.value))}
+                  className="w-16 accent-accent h-1 cursor-pointer"
+                  title={`Opacidad ortofoto: ${Math.round(satelliteOpacity * 100)}%`}
+                />
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -710,7 +1213,7 @@ export default function ContourViewer({
         </div>
 
         <div className="flex flex-col bg-bg-surface p-1 rounded-sm border border-border-main shadow-lg transition-colors duration-300 w-10">
-          <button onClick={handleExportDXF} className="py-2 text-text-faded hover:text-accent transition-colors flex flex-col items-center justify-center gap-1" title="Exportar a AutoCAD (DXF)">
+          <button onClick={handleExportDXF} className="py-2 text-text-faded hover:text-accent transition-colors flex flex-col items-center justify-center gap-1" title="Exportar a AutoCAD / SketchUp (DXF en Metros reales). En SketchUp: en Archivo > Importar > Opciones, asegurar Unidades: Metros.">
             <Download size={14} />
             <span className="text-[8px] font-bold tracking-widest uppercase">DXF</span>
           </button>
@@ -731,15 +1234,130 @@ export default function ContourViewer({
       <svg
         ref={svgRef}
         viewBox="-180 -200 360 400"
-        className="w-full h-full object-contain origin-center overflow-visible z-10 drop-shadow-[0_0_15px_rgba(197,160,89,0.15)] cursor-grab active:cursor-grabbing"
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
+        className={`w-full h-full object-contain origin-center overflow-visible z-10 drop-shadow-[0_0_15px_rgba(197,160,89,0.15)] ${isDrawingLot ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
+        onPointerDown={(e) => {
+          if (isDrawingLot) {
+            if (isPerspective) {
+               alert("El dibujo de lote está disponible en vista Planta.");
+               if (setIsDrawingLot) setIsDrawingLot(false);
+               return;
+            }
+            e.preventDefault();
+            e.stopPropagation();
+            
+            if (!zoomGroupRef.current) return;
+            const pt = d3.pointer(e.nativeEvent, zoomGroupRef.current);
+            const svgX = pt[0];
+            const svgY = pt[1];
+            
+            const pitch = isPerspective ? rotation.x : 0;
+            const yaw = isPerspective ? rotation.z : 0;
+            const radPitch = (pitch * Math.PI) / 180;
+            const radYaw = (yaw * Math.PI) / 180;
+            const cosP = Math.cos(radPitch);
+            const sinP = Math.sin(radPitch);
+            const cosY = Math.cos(radYaw);
+            const sinY = Math.sin(radYaw);
+            const a = cosY;
+            const b = sinY * cosP;
+            const c = -sinY;
+            const d = cosY * cosP;
+            const det = a * d - b * c;
+            if (det === 0) return;
+            
+            const cx = (n - 1) / 2;
+            const cy = (m - 1) / 2;
+            const eT = -a * cx - c * cy;
+            const fT = -b * cx - d * cy;
+            
+            const gridX = (d * (svgX - eT) - c * (svgY - fT)) / det;
+            const gridY = (a * (svgY - fT) - b * (svgX - eT)) / det;
+            
+            const elev = getGridElevAt(gridX, gridY) ?? (meshData?.minEv || 0);
+
+            if (e.detail === 2) {
+              if (setIsDrawingLot) setIsDrawingLot(false);
+              setDrawingCursor(null);
+              return;
+            }
+
+            if (customLotPts && customLotPts.length >= 2) {
+              const transform = d3.zoomTransform(svgRef.current as any);
+              const firstPt = customLotPts[0];
+              const firstProj = projectPoint(firstPt.x, firstPt.y, firstPt.elev);
+              const currProj = projectPoint(gridX, gridY, elev);
+              const dist = Math.sqrt(
+                Math.pow(currProj.X - firstProj.X, 2) +
+                Math.pow(currProj.Y - firstProj.Y, 2)
+              ) * transform.k;
+              if (dist < 10) {
+                if (setIsDrawingLot) setIsDrawingLot(false);
+                setDrawingCursor(null);
+                return;
+              }
+            }
+
+            const newPts = customLotPts ? [...customLotPts] : [];
+            newPts.push({ x: gridX, y: gridY, elev });
+            if (setCustomLotPts) setCustomLotPts(newPts);
+          } else {
+            handlePointerDown(e);
+          }
+        }}
+        onPointerMove={(e) => {
+          if (isDrawingLot) {
+            if (!zoomGroupRef.current) return;
+            const pt = d3.pointer(e.nativeEvent, zoomGroupRef.current);
+            const svgX = pt[0];
+            const svgY = pt[1];
+
+            const pitch = isPerspective ? rotation.x : 0;
+            const yaw = isPerspective ? rotation.z : 0;
+            const radPitch = (pitch * Math.PI) / 180;
+            const radYaw = (yaw * Math.PI) / 180;
+            const cosP = Math.cos(radPitch);
+            const sinP = Math.sin(radPitch);
+            const cosY = Math.cos(radYaw);
+            const sinY = Math.sin(radYaw);
+            const a = cosY;
+            const b = sinY * cosP;
+            const c = -sinY;
+            const d = cosY * cosP;
+            const det = a * d - b * c;
+            if (det === 0) return;
+            
+            const cx = (n - 1) / 2;
+            const cy = (m - 1) / 2;
+            const eT = -a * cx - c * cy;
+            const fT = -b * cx - d * cy;
+            
+            const gridX = (d * (svgX - eT) - c * (svgY - fT)) / det;
+            const gridY = (a * (svgY - fT) - b * (svgX - eT)) / det;
+            const elev = getGridElevAt(gridX, gridY) ?? (meshData?.minEv || 0);
+            
+            setDrawingCursor({ x: gridX, y: gridY });
+          } else {
+            handlePointerMove(e);
+          }
+        }}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
       >
         {/* Main Zoom Group */}
         <g ref={zoomGroupRef}>
-          {/* Pedestal de extrusión y Base removidos por solicitud del usuario */}
+          {/* Ortofoto Satelital de Fondo en Modo Planta */}
+          {!isPerspective && showSatelliteInPlan && meshData?.satelliteTexture && (
+            <image
+              href={meshData.satelliteTexture}
+              x={-(n - 1) / 2}
+              y={-(m - 1) / 2}
+              width={n - 1}
+              height={m - 1}
+              preserveAspectRatio="none"
+              opacity={satelliteOpacity}
+              className="pointer-events-none select-none"
+            />
+          )}
 
           {/* Contornos Topográficos Elevados */}
           {contours.map((c, i) => {
@@ -775,16 +1393,29 @@ export default function ContourViewer({
             let labelPt = null;
             let labelAngle = 0;
             if (isMajor && !isPerspective && c.coordinates.length > 0) {
-              const poly = c.type === 'MultiLineString' ? c.coordinates[0][0] : (c.coordinates[0] as any);
-              if (poly && poly.length > 10) {
-                const midIdx = Math.floor(poly.length * 0.25);
-                const pt1 = poly[midIdx];
-                const pt2 = poly[midIdx + 1];
-                if (pt1 && pt2) {
-                  labelPt = { X: pt1[0], Y: pt1[1] };
-                  labelAngle = Math.atan2(pt2[1] - pt1[1], pt2[0] - pt1[0]) * 180 / Math.PI;
-                  if (labelAngle > 90 || labelAngle < -90) labelAngle += 180;
+              try {
+                // c.coordinates for MultiPolygon is: [ [ [ [x,y], [x,y]... ] ] ]
+                const firstPoly = c.coordinates[0] as any[];
+                if (firstPoly && firstPoly.length > 0) {
+                  // The exterior ring
+                  const ring = firstPoly[0];
+                  if (ring && ring.length > 10) {
+                    // Stagger the label position along the ring based on contour index 'i'
+                    // This prevents all labels from aligning perfectly in a straight line
+                    const factor = 0.15 + ((i % 5) * 0.15); // 15%, 30%, 45%, 60%, 75%
+                    const midIdx = Math.floor(ring.length * factor);
+                    const pt1 = ring[midIdx];
+                    const pt2 = ring[midIdx + 1];
+                    if (pt1 && pt2 && typeof pt1[0] === 'number') {
+                      labelPt = { X: pt1[0], Y: pt1[1] };
+                      labelAngle = Math.atan2(pt2[1] - pt1[1], pt2[0] - pt1[0]) * (180 / Math.PI);
+                      // Make text upright
+                      if (labelAngle > 90 || labelAngle < -90) labelAngle += 180;
+                    }
+                  }
                 }
+              } catch (e) {
+                // Ignore parsing errors for labels
               }
             }
 
@@ -799,18 +1430,19 @@ export default function ContourViewer({
                   strokeOpacity={strokeOp}
                   vectorEffect="non-scaling-stroke"
                 />
-                {labelPt && (
+                {showContourLabels && labelPt && (
                   <text
                     x={labelPt.X}
                     y={labelPt.Y}
                     transform={`rotate(${labelAngle}, ${labelPt.X}, ${labelPt.Y})`}
                     fill={strokeColor}
-                    fontSize="6"
+                    fontSize="1.5"
+                    fontFamily="monospace"
                     fontWeight="bold"
                     textAnchor="middle"
-                    dy="-2"
+                    dy="-0.5"
                     className="pointer-events-none"
-                    style={{ textShadow: "0px 0px 2px var(--theme-bg-base)" }}
+                    style={{ textShadow: "0px 0px 1px var(--theme-bg-base)", fontSize: "1.5px" }}
                   >
                     {c.value.toFixed(1)}m
                   </text>
@@ -820,7 +1452,7 @@ export default function ContourViewer({
           })}
 
           {/* Vías Extruidas (2.5D visual) */}
-          {highways3D.map((hw, i) => (
+          {layerVisibility.highways && highways3D.map((hw, i) => (
             <path
               key={`h-${i}`}
               d={render3DPath(hw.pts, false)}
@@ -834,7 +1466,7 @@ export default function ContourViewer({
           ))}
 
           {/* Cursos de Agua */}
-          {waterways3D.map((ww, i) => (
+          {layerVisibility.waterways && waterways3D.map((ww, i) => (
             <path
               key={`w-${i}`}
               d={render3DPath(ww.pts, false)}
@@ -847,8 +1479,24 @@ export default function ContourViewer({
             />
           ))}
 
-          {/* Huellas de Edificios con Extrusión Visual a Tierra */}
-          {buildings3D.map((obj, i) => {
+          {/* Sombras Solares de Edificios OSM */}
+          {analysisMode === 'solar' && solarParams?.showShadows && layerVisibility.buildings &&
+            buildings3D.map((obj, i) => {
+              const poly = getSolarShadowPolygon(obj.pts, obj.height);
+              if (!poly) return null;
+              return (
+                <path
+                  key={`b-shadow-${i}`}
+                  d={render3DPath(poly, true)}
+                  fill="var(--theme-shadow-solar)"
+                  fillOpacity="0.35"
+                  className="pointer-events-none"
+                />
+              );
+            })}
+
+          {/* Huellas de Edificios de Contexto OSM */}
+          {layerVisibility.buildings && buildings3D.map((obj, i) => {
             const { pts, height } = obj;
             const baseElev = meshData?.minEv || 0;
             const roofPts = pts.map(p => ({ ...p, elev: p.elev + height }));
@@ -895,7 +1543,368 @@ export default function ContourViewer({
               </g>
             );
           })}
+
+          {/* MODO OGUC: Lote y Proyecto */}
+          {analysisMode === 'oguc' && lotPolygon && projectVolume && ogucParams && (
+            <g>
+              {/* Sombras OGUC: Proyecto */}
+              {ogucParams.showShadows && [135, 180, 225].map((angle, k) => {
+                const shadow = getOgucShadowPolygon(projectVolume.pts, projectVolume.height, ogucParams.angle, angle);
+                return shadow && (
+                  <path
+                    key={`oguc-shadow-${k}`}
+                    d={render3DPath(shadow, true)}
+                    fill="#ef4444"
+                    fillOpacity="0.2"
+                    stroke="#ef4444"
+                    strokeWidth={0.3}
+                    strokeOpacity="0.5"
+                    vectorEffect="non-scaling-stroke"
+                    className="pointer-events-none"
+                  />
+                );
+              })}
+
+              {/* Lote (y Previsualización del Lote Dibujado) */}
+              {(isDrawingLot && customLotPts && customLotPts.length >= 1 && drawingCursor) ? (
+                <g>
+                   <path
+                     d={render3DPath([...customLotPts, ...(drawingCursor ? [{ x: drawingCursor.x, y: drawingCursor.y, elev: getGridElevAt(drawingCursor.x, drawingCursor.y) ?? (meshData?.minEv || 0) }] : [])], false)}
+                     fill="none"
+                     stroke="#ec4899"
+                     strokeWidth="1.5"
+                     strokeDasharray="1,1"
+                     vectorEffect="non-scaling-stroke"
+                   />
+                   {customLotPts.map((pt, i) => {
+                     const proj = projectPoint(pt.x, pt.y, pt.elev);
+                     return (
+                       <circle key={i} cx={proj.X} cy={proj.Y} r={0.2} fill="#ec4899" vectorEffect="non-scaling-stroke" />
+                     )
+                   })}
+                </g>
+              ) : lotPolygon ? (
+                <path
+                  d={render3DPath(lotPolygon, true)}
+                  fill="none"
+                  stroke="#ec4899"
+                  strokeWidth={1}
+                  strokeDasharray="3,2"
+                  vectorEffect="non-scaling-stroke"
+                />
+              ) : null}
+
+              {/* Volumen Proyecto */}
+              {(() => {
+                if (analysisMode !== 'oguc' || !projectVolume || projectVolume.collapsed) return null;
+                const { pts, height } = projectVolume;
+                if (pts.length < 3) return null;
+                const rawRoofPts = pts.map(p => ({ ...p, elev: p.elev + height }));
+                const flatRoofElev = Math.min(...rawRoofPts.map(p => p.elev));
+                const roofPts = pts.map(p => ({ ...p, elev: flatRoofElev }));
+                
+                const isPointInPolygon = (pt: {x: number, y: number}, polygon: {x: number, y: number}[]) => {
+                  let inside = false;
+                  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+                    const xi = polygon[i].x, yi = polygon[i].y;
+                    const xj = polygon[j].x, yj = polygon[j].y;
+                    const intersect = ((yi > pt.y) !== (yj > pt.y))
+                        && (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi);
+                    if (intersect) inside = !inside;
+                  }
+                  return inside;
+                };
+
+                const handleVolumePointerDown = (e: React.PointerEvent) => {
+                  if (isDrawingLot || (customLotPts && customLotPts.length > 0)) return; // No independiente si hay lote dibujado
+                  
+                  e.stopPropagation();
+                  isDraggingVolumeRef.current = true;
+                  dragStartRef.current = { cx: e.clientX, cy: e.clientY, ox: dragOffset.x, oy: dragOffset.y };
+                  
+                  const handleMove = (ev: PointerEvent) => {
+                    if (!isDraggingVolumeRef.current) return;
+                    const transform = d3.zoomTransform(svgRef.current as any);
+                    const zK = transform.k;
+                    const dX = (ev.clientX - dragStartRef.current.cx) / zK;
+                    const dY = (ev.clientY - dragStartRef.current.cy) / zK;
+
+                    let pitch = isPerspective ? rotation.x : 0;
+                    let yaw = isPerspective ? rotation.z : 0;
+                    const radPitch = (pitch * Math.PI) / 180;
+                    const radYaw = (yaw * Math.PI) / 180;
+                    const cosP = Math.cos(radPitch);
+                    const sinP = Math.sin(radPitch);
+                    const cosY = Math.cos(radYaw);
+                    const sinY = Math.sin(radYaw);
+                    const a = cosY;
+                    const b = sinY * cosP;
+                    const c = -sinY;
+                    const d = cosY * cosP;
+                    
+                    const det = a * d - b * c;
+                    if (det === 0) return;
+
+                    const dx = (d * dX - c * dY) / det;
+                    const dy = (a * dY - b * dX) / det;
+
+                    setDragOffset({
+                      x: dragStartRef.current.ox + dx,
+                      y: dragStartRef.current.oy + dy
+                    });
+                  };
+
+                  const handleUp = () => {
+                    isDraggingVolumeRef.current = false;
+                    window.removeEventListener('pointermove', handleMove);
+                    window.removeEventListener('pointerup', handleUp);
+                  };
+
+                  window.addEventListener('pointermove', handleMove);
+                  window.addEventListener('pointerup', handleUp);
+                };
+
+                const cxBase = pts.reduce((sum, p) => sum + p.x, 0) / pts.length;
+                const cyBase = pts.reduce((sum, p) => sum + p.y, 0) / pts.length;
+
+                return (
+                  <g onPointerDown={handleVolumePointerDown} className={(!customLotPts || customLotPts.length === 0) && !isDrawingLot ? 'cursor-grab active:cursor-grabbing' : ''}>
+                    {isPerspective && pts.map((p, j) => {
+                      const pNext = pts[(j + 1) % pts.length];
+                      const rNext = roofPts[(j + 1) % pts.length];
+                      const rp = roofPts[j];
+                      
+                      const midX = (p.x + pNext.x) / 2;
+                      const midY = (p.y + pNext.y) / 2;
+                      const dx = midX - cxBase;
+                      const dy = midY - cyBase;
+
+                      let fillColor = "#b45309"; // Oriente/Poniente
+                      let fillOpacity = "0.6";
+                      let strokeColor = "#f59e0b";
+
+                      if (Math.abs(dy) > Math.abs(dx)) {
+                        if (dy > 0) {
+                          // Sur (+Y)
+                          fillColor = "#92400e";
+                          fillOpacity = "0.85";
+                          strokeColor = "#f59e0b";
+                        } else {
+                          // Norte (-Y)
+                          fillColor = "#fbbf24";
+                          fillOpacity = "0.3";
+                          strokeColor = "#f59e0b";
+                        }
+                      }
+
+                      return (
+                        <path
+                          key={j}
+                          d={render3DPath([p, pNext, rNext, rp], true)}
+                          fill={fillColor}
+                          fillOpacity={fillOpacity}
+                          stroke={strokeColor}
+                          strokeWidth="0.5"
+                        />
+                      );
+                    })}
+                    <path
+                      d={render3DPath(roofPts, true)}
+                      fill="#f59e0b"
+                      fillOpacity="0.7"
+                      stroke="#f59e0b"
+                      strokeWidth={0.5}
+                      vectorEffect="non-scaling-stroke"
+                    />
+                    {roofPts.map((rp, k) => {
+                      const proj = projectPoint(rp.x, rp.y, rp.elev);
+                      return <circle key={`v-${k}`} cx={proj.X} cy={proj.Y} r={0.3} fill="#f59e0b" vectorEffect="non-scaling-stroke" />;
+                    })}
+                  </g>
+                );
+              })()}
+            </g>
+          )}
+
+          {/* MODO SOLAR: Proyecto y Arco Solar */}
+          {analysisMode === 'solar' && (
+            <g>
+              {projectVolume && solarParams?.showShadows && (() => {
+                const shadow = getSolarShadowPolygon(projectVolume.pts, projectVolume.height);
+                return shadow && (
+                  <path
+                    d={render3DPath(shadow, true)}
+                    fill="var(--theme-shadow-solar)"
+                    fillOpacity="0.35"
+                    className="pointer-events-none"
+                  />
+                );
+              })()}
+
+              {/* Volumen Demo */}
+              {projectVolume && (() => {
+                const { pts, height } = projectVolume;
+                const roofPts = pts.map(p => ({ ...p, elev: p.elev + height }));
+                const pathRoof = render3DPath(roofPts, true);
+
+                return (
+                  <g>
+                    {isPerspective && pts.map((p, j) => {
+                      const pNext = pts[(j + 1) % pts.length];
+                      const rNext = roofPts[(j + 1) % pts.length];
+                      const rp = roofPts[j];
+                      return (
+                        <path
+                          key={j}
+                          d={render3DPath([p, pNext, rNext, rp], true)}
+                          fill="#f59e0b"
+                          fillOpacity="0.5"
+                          stroke="#f59e0b"
+                          strokeWidth="0.5"
+                        />
+                      );
+                    })}
+                    <path
+                      d={pathRoof}
+                      fill="#f59e0b"
+                      fillOpacity="0.7"
+                      stroke="#f59e0b"
+                      strokeWidth="1"
+                    />
+                  </g>
+                );
+              })()}
+
+              {/* Heliodon: Guías (Horizonte, Elevaciones, Meridiano) en PERSPECTIVA */}
+              {isPerspective && heliodonGuides && (
+                <g className="heliodon-guides">
+                  <path d={render3DPath(heliodonGuides.horizonPts, true)} fill="none" stroke="var(--theme-text-muted)" strokeWidth="1" strokeDasharray="2,4" opacity="0.4" />
+                  {heliodonGuides.elevLines.map((pts, i) => (
+                    <path key={`el-line-${i}`} d={render3DPath(pts, true)} fill="none" stroke="var(--theme-text-muted)" strokeWidth="0.5" opacity="0.2" />
+                  ))}
+                  <path d={render3DPath(heliodonGuides.northLine, false)} fill="none" stroke="var(--theme-text-muted)" strokeWidth="1" opacity="0.3" />
+                  {heliodonGuides.cardinals.map((c, i) => {
+                    const p = projectPoint(c.x, c.y, c.elev);
+                    return (
+                      <text key={`cardinal-${i}`} x={p.X} y={p.Y} fill="var(--theme-text-faded)" fontSize="8" fontWeight="bold" textAnchor="middle" dy="3" opacity="0.7">
+                        {c.label}
+                      </text>
+                    );
+                  })}
+                </g>
+              )}
+
+              {/* Heliodon: Arcos Solares en PERSPECTIVA */}
+              {isPerspective && solarParams?.showSunPath && sunPaths && currentSunPos && (
+                <g>
+                  {sunPaths.map((pathObj, k) => (
+                    <path
+                      key={`sun-path-${k}`}
+                      d={render3DPath(pathObj.pts, false)}
+                      fill="none"
+                      stroke={pathObj.color}
+                      strokeWidth="2"
+                      strokeOpacity="0.8"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  ))}
+                  {(() => {
+                    const p = projectPoint(currentSunPos.x, currentSunPos.y, currentSunPos.elev);
+                    // Dibuja el sol solo si está sobre el horizonte
+                    if (sunPosition && sunPosition.elevation > 0) {
+                      return (
+                        <g transform={`translate(${p.X}, ${p.Y})`}>
+                          <circle r="5" fill="#fbbf24" stroke="#f59e0b" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+                          <circle r="12" fill="#fbbf24" opacity="0.3" vectorEffect="non-scaling-stroke" />
+                          <circle r="20" fill="#fbbf24" opacity="0.1" vectorEffect="non-scaling-stroke" />
+                        </g>
+                      );
+                    }
+                    return null;
+                  })()}
+                </g>
+              )}
+            </g>
+          )}
         </g>
+
+        {/* HUD Overlay 2D para PLANTA (Fuera de zoomGroupRef) */}
+        {!isPerspective && analysisMode === 'solar' && solarParams?.showSunPath && (
+          <g className="heliodon-hud-plan pointer-events-none">
+            {/* Guías HUD */}
+            {heliodonGuides && (
+              <g opacity="0.6">
+                <path d={`M ${heliodonGuides.horizonPts.map(p => `${p.x},${p.y}`).join(' L ')} Z`} fill="none" stroke="var(--theme-text-muted)" strokeWidth="1" strokeDasharray="2,4" />
+                {heliodonGuides.elevLines.map((pts, i) => (
+                  <path key={`hud-el-${i}`} d={`M ${pts.map(p => `${p.x},${p.y}`).join(' L ')} Z`} fill="none" stroke="var(--theme-text-muted)" strokeWidth="0.5" opacity="0.4" />
+                ))}
+                <path d={`M ${heliodonGuides.northLine.map(p => `${p.x},${p.y}`).join(' L ')}`} fill="none" stroke="var(--theme-text-muted)" strokeWidth="1" opacity="0.5" />
+                {heliodonGuides.cardinals.map((c, i) => (
+                  <text key={`hud-c-${i}`} x={c.x} y={c.y} fill="var(--theme-text-faded)" fontSize="8" fontWeight="bold" textAnchor="middle" dy="3">
+                    {c.label}
+                  </text>
+                ))}
+              </g>
+            )}
+
+            {/* Arcos Solares HUD */}
+            {sunPaths && sunPaths.map((pathObj, k) => (
+              <path
+                key={`hud-path-${k}`}
+                d={`M ${pathObj.pts.map(p => `${p.x},${p.y}`).join(' L ')}`}
+                fill="none"
+                stroke={pathObj.color}
+                strokeWidth="2"
+                opacity="0.8"
+              />
+            ))}
+
+            {/* Sol actual HUD */}
+            {currentSunPos && sunPosition && sunPosition.elevation > 0 && (
+              <g transform={`translate(${currentSunPos.x}, ${currentSunPos.y})`}>
+                <circle r="5" fill="#fbbf24" stroke="#f59e0b" strokeWidth="1" />
+                <circle r="12" fill="#fbbf24" opacity="0.3" />
+              </g>
+            )}
+          </g>
+        )}
+
+        {/* Info HUD */}
+        {analysisMode === 'oguc' && lotPolygon && projectVolume && ogucParams && (
+            <div className="absolute bottom-4 left-4 bg-bg-surface/80 backdrop-blur-md border border-border-main p-3 rounded-md text-[10px] uppercase font-mono tracking-widest text-text-main flex flex-col gap-2 min-w-[250px] shadow-lg pointer-events-none">
+              <div className="border-b border-border-strong pb-2 mb-1 flex justify-between items-center">
+                <span className="text-accent font-bold">Análisis Normativo OGUC</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 bg-[#ec4899] inline-block rounded-sm"></span>
+                <span>Polígono de Lote</span>
+                <span className="ml-auto text-text-faded">{polygonArea(lotPolygon).toFixed(0)} m²</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 bg-accent inline-block rounded-sm"></span>
+                <span>Volumen Propuesto</span>
+                <span className="ml-auto text-text-faded font-bold">h = {projectVolume.height.toFixed(1)}m</span>
+              </div>
+              <div className="flex items-center gap-2 mt-1 pt-1 border-t border-border-faded">
+                <span className="text-text-subtle">Ángulo Rasante Base</span>
+                <span className="ml-auto text-text-faded">{ogucParams.angle}º</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-text-subtle">Distanciamiento Aplicado</span>
+                <span className="ml-auto text-text-faded">{ogucParams.minSetback}m</span>
+              </div>
+              {projectVolume.collapsed && (
+                <div className="mt-2 text-[#ef4444] leading-tight">
+                  <span className="font-bold">Aviso:</span> Distanciamiento mayor al tamaño del lote. Reduce el valor para generar el volumen.
+                </div>
+              )}
+              {!projectVolume.collapsed && (
+                <div className="mt-2 text-text-subtle text-[8px] leading-tight opacity-75">
+                  PARA SIMPLIFICACIÓN DOCENTE SE<br/>CONSIDERA VOLUMEN TEÓRICO BASADO EN<br/>ÁNGULO RASANTE Y DISTANCIAMIENTO UNIFORME.
+                </div>
+              )}
+            </div>
+          )}
       </svg>
 
       {/* HUD Metrics & Bottom Controls */}
@@ -913,28 +1922,106 @@ export default function ContourViewer({
           </div>
 
           <div className="bg-bg-surface/95 border border-border-main p-3 rounded-sm backdrop-blur-sm shadow-lg w-64 mt-2 pointer-events-auto">
-            <h3 className="text-[10px] font-bold text-accent uppercase tracking-widest mb-2 border-b border-border-main pb-1">Leyenda Topográfica</h3>
-            <div className="space-y-1.5">
-              <div className="flex justify-between items-center text-[9px] font-mono text-text-main">
-                <span className="flex items-center gap-1.5"><div className="w-4 h-0.5 bg-text-main"></div> Curvas Maestras</span>
-                <span>Cada {(interval * masterIntervalCount).toFixed(1)}m</span>
-              </div>
-              <div className="flex justify-between items-center text-[9px] font-mono text-text-faded">
-                <span className="flex items-center gap-1.5"><div className="w-4 h-[1px] bg-text-muted"></div> Curvas Intermedias</span>
-                <span>Cada {interval}m</span>
-              </div>
-              <div className="flex justify-between items-center text-[9px] font-mono text-text-faded pt-1 border-t border-border-faded">
-                <span>Rango Visible</span>
-                <span>{contours.length > 0 ? `${contours[0].value.toFixed(1)}m - ${contours[contours.length - 1].value.toFixed(1)}m` : 'N/A'}</span>
-              </div>
-              <div className="flex justify-between items-center text-[9px] font-mono text-text-faded">
-                <span>Total Isolíneas</span>
-                <span>{contours.length}</span>
-              </div>
-            </div>
-            <p className="text-[8px] text-text-subtle uppercase tracking-widest mt-3 leading-relaxed">
-              Las curvas agrupadas indican mayor pendiente. Las curvas separadas denotan un terreno llano.
-            </p>
+            {analysisMode === 'topographic' && (
+              <>
+                <h3 className="text-[10px] font-bold text-accent uppercase tracking-widest mb-2 border-b border-border-main pb-1">Leyenda Topográfica</h3>
+                <div className="space-y-1.5">
+                  <div className="flex justify-between items-center text-[9px] font-mono text-text-main">
+                    <span className="flex items-center gap-1.5"><div className="w-4 h-0.5 bg-text-main"></div> Curvas Maestras</span>
+                    <span>Cada {(interval * masterIntervalCount).toFixed(1)}m</span>
+                  </div>
+                  <div className="flex justify-between items-center text-[9px] font-mono text-text-faded">
+                    <span className="flex items-center gap-1.5"><div className="w-4 h-[1px] bg-text-muted"></div> Curvas Intermedias</span>
+                    <span>Cada {interval}m</span>
+                  </div>
+                  <div className="flex justify-between items-center text-[9px] font-mono text-text-faded pt-1 border-t border-border-faded">
+                    <span>Rango Visible</span>
+                    <span>{contours.length > 0 ? `${contours[0].value.toFixed(1)}m - ${contours[contours.length - 1].value.toFixed(1)}m` : 'N/A'}</span>
+                  </div>
+                  <div className="flex justify-between items-center text-[9px] font-mono text-text-faded">
+                    <span>Total Isolíneas</span>
+                    <span>{contours.length}</span>
+                  </div>
+                </div>
+                <p className="text-[8px] text-text-subtle uppercase tracking-widest mt-3 leading-relaxed">
+                  Las curvas agrupadas indican mayor pendiente. Las curvas separadas denotan un terreno llano.
+                </p>
+              </>
+            )}
+
+            {analysisMode === 'oguc' && (
+              <>
+                <h3 className="text-[10px] font-bold text-accent uppercase tracking-widest mb-2 border-b border-border-main pb-1">Análisis Normativo OGUC</h3>
+                <div className="space-y-1.5">
+                  <div className="flex justify-between items-center text-[9px] font-mono text-text-main">
+                    <span className="flex items-center gap-1.5"><div className="w-3 h-3 bg-[#ec4899] border border-[#ec4899]"></div> Polígono de Lote</span>
+                  </div>
+                  <div className="flex justify-between items-center text-[9px] font-mono text-text-main">
+                    <span className="flex items-center gap-1.5"><div className="w-3 h-3 bg-[#ef4444] opacity-50 border border-[#ef4444]"></div> Volumen Propuesto</span>
+                    <span>h = {ogucParams?.maxHeight}m</span>
+                  </div>
+                  <div className="flex justify-between items-center text-[9px] font-mono text-text-faded pt-1 border-t border-border-faded">
+                    <span>Ángulo Rasante Base</span>
+                    <span>{ogucParams?.angle}º</span>
+                  </div>
+                  {ogucParams?.showShadows && projectVolume && (
+                    <div className="flex justify-between items-center text-[9px] font-mono text-text-faded">
+                      <span>Área Sombra Aprox.</span>
+                      <span>{Math.round(polygonArea(getOgucShadowPolygon(projectVolume.pts, projectVolume.height, ogucParams.angle, 135) || []))} m²</span>
+                    </div>
+                  )}
+                </div>
+                <p className="text-[8px] text-text-subtle uppercase tracking-widest mt-3 leading-relaxed">
+                  Para simplificación docente se considera comparación global de áreas de sombra (Teórica / Propuesta).
+                </p>
+              </>
+            )}
+
+            {analysisMode === 'solar' && (
+              <>
+                <h3 className="text-[10px] font-bold text-accent uppercase tracking-widest mb-2 border-b border-border-main pb-1">Análisis Solar</h3>
+                <div className="space-y-1.5">
+                  <div className="flex justify-between items-center text-[9px] font-mono text-text-faded">
+                    <span>Latitud</span>
+                    <span>{locationLat?.toFixed(4)}º</span>
+                  </div>
+                  <div className="flex justify-between items-center text-[9px] font-mono text-text-faded">
+                    <span>Longitud</span>
+                    <span>{locationLon?.toFixed(4)}º</span>
+                  </div>
+                  <div className="flex justify-between items-center text-[9px] font-mono text-text-main pt-1 border-t border-border-faded">
+                    <span>Altura Solar (Elev)</span>
+                    <span className={sunPosition && sunPosition.elevation > 0 ? "text-[#f59e0b]" : "text-text-muted"}>
+                      {sunPosition ? sunPosition.elevation.toFixed(1) : '--'}º
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center text-[9px] font-mono text-text-main">
+                    <span>Acimut</span>
+                    <span>{sunPosition ? sunPosition.azimuth.toFixed(1) : '--'}º</span>
+                  </div>
+                </div>
+                <div className="mt-2 pt-2 border-t border-border-faded">
+                  <h4 className="text-[9px] font-bold text-text-main mb-1 uppercase tracking-wider">Heliodon (Bóveda Celeste)</h4>
+                  <div className="space-y-1">
+                    <div className="flex justify-between items-center text-[8px] font-mono text-text-faded">
+                      <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-[#f87171]"></div> Solsticio Verano</span>
+                      <span>21 Dic</span>
+                    </div>
+                    <div className="flex justify-between items-center text-[8px] font-mono text-text-faded">
+                      <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-[#fbbf24]"></div> Equinoccio</span>
+                      <span>21 Mar / 21 Sep</span>
+                    </div>
+                    <div className="flex justify-between items-center text-[8px] font-mono text-text-faded">
+                      <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-[#60a5fa]"></div> Solsticio Invierno</span>
+                      <span>21 Jun</span>
+                    </div>
+                  </div>
+                </div>
+                <p className="text-[8px] text-text-subtle uppercase tracking-widest mt-3 leading-relaxed">
+                  La posición astronómica y sombras se calculan a tiempo real según la fecha y hora seleccionada.
+                </p>
+              </>
+            )}
           </div>
         </div>
 
