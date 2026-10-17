@@ -4,6 +4,12 @@ import { Map, Layers, ZoomIn, ZoomOut, Maximize, RotateCw, Download } from 'luci
 import { MeshData } from '../lib/meshProcessor';
 import { AnalysisMode } from '../App';
 import { getSunPosition } from '../lib/SunPosition';
+import {
+  OgucParams,
+  computeOgucModel,
+  computePolygonAreaM2,
+  convexHull3D,
+} from '../lib/ogucService';
 
 interface ContourViewerProps {
   interval: number;
@@ -18,16 +24,7 @@ interface ContourViewerProps {
   analysisMode?: AnalysisMode;
   locationLat?: number;
   locationLon?: number;
-  ogucParams?: {
-    regionGroup: 1 | 2 | 3;
-    rasanteStartHeight: number;
-    minSetback: number;
-    applyExtraSetback: boolean;
-    maxHeight: number;
-    continuousBaseHeight: number;
-    showShadows: boolean;
-    angle: number; // For fallback until Module 2 is complete
-  };
+  ogucParams?: OgucParams;
   solarParams?: {
     date: Date;
     time: number;
@@ -43,72 +40,6 @@ interface ContourViewerProps {
   setIsDrawingLot?: (val: boolean) => void;
   customLotPts?: {x: number, y: number, elev: number}[] | null;
   setCustomLotPts?: (pts: {x: number, y: number, elev: number}[] | null) => void;
-}
-
-const insetPolygonBisector = (pts: {x: number, y: number}[], offsetMeters: number, meshData: any, n: number) => {
-    if (pts.length < 3) return pts;
-    
-    let area = 0;
-    for (let i = 0; i < pts.length; i++) {
-        let j = (i + 1) % pts.length;
-        area += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
-    }
-    const isClockwise = area > 0;
-    const sign = isClockwise ? 1 : -1;
-
-    const offsetGrid = meshData && n > 0 ? offsetMeters * (n / meshData.w) : offsetMeters;
-    
-    const newPts = [];
-    for (let i = 0; i < pts.length; i++) {
-        const prev = pts[(i - 1 + pts.length) % pts.length];
-        const curr = pts[i];
-        const next = pts[(i + 1) % pts.length];
-
-        let v1x = curr.x - prev.x;
-        let v1y = curr.y - prev.y;
-        const len1 = Math.hypot(v1x, v1y);
-        v1x /= len1; v1y /= len1;
-
-        let v2x = next.x - curr.x;
-        let v2y = next.y - curr.y;
-        const len2 = Math.hypot(v2x, v2y);
-        v2x /= len2; v2y /= len2;
-
-        const n1x = -v1y * sign;
-        const n1y = v1x * sign;
-        
-        const n2x = -v2y * sign;
-        const n2y = v2x * sign;
-
-        let bx = n1x + n2x;
-        let by = n1y + n2y;
-        const blen = Math.hypot(bx, by);
-        
-        if (blen < 0.0001) {
-            bx = n1x; by = n1y;
-        } else {
-            bx /= blen; by /= blen;
-        }
-
-        const dot = n1x * bx + n1y * by;
-        const dist = Math.abs(dot) > 0.05 ? offsetGrid / dot : offsetGrid;
-
-        newPts.push({
-            x: curr.x + bx * dist,
-            y: curr.y + by * dist,
-        });
-    }
-    
-    let newArea = 0;
-    for (let i = 0; i < newPts.length; i++) {
-        let j = (i + 1) % newPts.length;
-        newArea += newPts[i].x * newPts[j].y - newPts[j].x * newPts[i].y;
-    }
-    if ((isClockwise && newArea <= 0) || (!isClockwise && newArea >= 0)) {
-        return null;
-    }
-    
-    return newPts;
 }
 
 export default function ContourViewer({
@@ -681,54 +612,152 @@ export default function ContourViewer({
     return v00 * (1 - dx) * (1 - dy) + v10 * dx * (1 - dy) + v01 * (1 - dx) * dy + v11 * dx * dy;
   };
 
-  const lotPolygon = useMemo(() => {
-    if (analysisMode !== 'oguc' || !ogucParams) return null;
-    if (!customLotPts || customLotPts.length < 3) return null;
-    
-    return customLotPts.map(p => ({
-      x: p.x,
-      y: p.y,
-      elev: getGridElevAt(p.x, p.y)
-    }));
-  }, [n, m, analysisMode, ogucParams, meshData, dragOffset, customLotPts]);
+  // Reset dragOffset whenever customLotPts changes externally
+  useEffect(() => {
+    setDragOffset({ x: 0, y: 0 });
+  }, [customLotPts]);
+
+  /**
+   * Convierte coordenadas de pantalla (clientX, clientY) a coordenadas exactas de la grilla (gridX, gridY, elev)
+   * invirtiendo: 1) CTM del viewBox SVG, 2) d3.zoomTransform, y 3) Matriz de proyección ortográfica/isométrica 2.5D con cota Z.
+   */
+  const screenToGrid = (clientX: number, clientY: number): { x: number; y: number; elev: number } | null => {
+    const svgEl = svgRef.current;
+    if (!svgEl) return null;
+
+    let zoomX = 0;
+    let zoomY = 0;
+
+    // 1. Convertir de píxeles de pantalla (clientX/Y) al sistema de coordenadas dentro de zoomGroupRef
+    if (zoomGroupRef.current && zoomGroupRef.current.getScreenCTM()) {
+      const ctm = zoomGroupRef.current.getScreenCTM()!;
+      const pt = svgEl.createSVGPoint();
+      pt.x = clientX;
+      pt.y = clientY;
+      const localPt = pt.matrixTransform(ctm.inverse());
+      zoomX = localPt.x;
+      zoomY = localPt.y;
+    } else if (svgEl.getScreenCTM()) {
+      const ctm = svgEl.getScreenCTM()!;
+      const pt = svgEl.createSVGPoint();
+      pt.x = clientX;
+      pt.y = clientY;
+      const svgPt = pt.matrixTransform(ctm.inverse());
+      const t = d3.zoomTransform(svgEl);
+      zoomX = (svgPt.x - t.x) / t.k;
+      zoomY = (svgPt.y - t.y) / t.k;
+    } else {
+      return null;
+    }
+
+    // 2. Invertir la matriz de proyección 2D / 2.5D (incluyendo iteración de punto fijo para la elevación del terreno en Perspectiva)
+    const pitch = isPerspective ? rotation.x : 0;
+    const yaw = isPerspective ? rotation.z : 0;
+    const radPitch = (pitch * Math.PI) / 180;
+    const radYaw = (yaw * Math.PI) / 180;
+    const cosP = Math.cos(radPitch);
+    const sinP = Math.sin(radPitch);
+    const cosY = Math.cos(radYaw);
+    const sinY = Math.sin(radYaw);
+
+    const a = cosY;
+    const b = sinY * cosP;
+    const c = -sinY;
+    const d = cosY * cosP;
+    const det = a * d - b * c;
+    if (Math.abs(det) < 1e-8) return null;
+
+    const cx = (n - 1) / 2;
+    const cy = (m - 1) / 2;
+    const zEffect = isPerspective ? Math.max(0.1, sinP) : 0;
+
+    let estElev = meshData ? (meshData.minEv + meshData.maxEv) / 2 : 0;
+    let gridX = cx;
+    let gridY = cy;
+
+    const iterations = isPerspective ? 4 : 1;
+    for (let iter = 0; iter < iterations; iter++) {
+      const normalizedZ = meshData ? estElev - meshData.minEv : estElev;
+      const zOffset = normalizedZ * zScale * zEffect;
+      const eT = -a * cx - c * cy;
+      const fT = -b * cx - d * cy - zOffset;
+
+      gridX = (d * (zoomX - eT) - c * (zoomY - fT)) / det;
+      gridY = (a * (zoomY - fT) - b * (zoomX - eT)) / det;
+      estElev = getGridElevAt(gridX, gridY) ?? (meshData?.minEv || 0);
+    }
+
+    gridX = Math.max(0, Math.min(n - 1, gridX));
+    gridY = Math.max(0, Math.min(m - 1, gridY));
+    const finalElev = getGridElevAt(gridX, gridY) ?? (meshData?.minEv || 0);
+
+    return { x: gridX, y: gridY, elev: finalElev };
+  };
+
+  const activeOgucParams: OgucParams = useMemo(
+    () =>
+      ogucParams || {
+        regionGroup: 3,
+        rasanteStartHeight: 2.5,
+        minSetback: 3,
+        applyExtraSetback: false,
+        maxHeight: 14,
+        continuousBaseHeight: 0,
+        showShadows: true,
+        angle: 51,
+      },
+    [ogucParams]
+  );
+
+  const effectiveLotBasePts = useMemo(() => {
+    if (customLotPts && customLotPts.length >= 3) {
+      return customLotPts.map((p) => ({
+        x: Math.max(0, Math.min(n - 1, p.x + dragOffset.x)),
+        y: Math.max(0, Math.min(m - 1, p.y + dragOffset.y)),
+      }));
+    }
+    if (isDrawingLot) return null;
+
+    // Lote por defecto centrado en el terreno cuando aún no se ha dibujado uno personalizado
+    const cx = (n - 1) / 2 + dragOffset.x;
+    const cy = (m - 1) / 2 + dragOffset.y;
+    const hw = n * 0.11;
+    const hh = m * 0.11;
+    return [
+      { x: cx - hw, y: cy - hh },
+      { x: cx + hw, y: cy - hh },
+      { x: cx + hw, y: cy + hh },
+      { x: cx - hw, y: cy + hh },
+    ];
+  }, [customLotPts, isDrawingLot, n, m, dragOffset]);
+
+  const ogucModel = useMemo(() => {
+    if ((analysisMode !== 'oguc' && analysisMode !== 'solar') || !effectiveLotBasePts) return null;
+    return computeOgucModel({
+      rawLotPts: effectiveLotBasePts,
+      ogucParams: activeOgucParams,
+      meshData,
+      n,
+      m,
+      getGridElevAt,
+    });
+  }, [analysisMode, effectiveLotBasePts, activeOgucParams, meshData, n, m]);
+
+  const lotPolygon = ogucModel?.lotPolygon || null;
 
   const projectVolume = useMemo(() => {
-    if (analysisMode !== 'oguc' || !ogucParams) return null;
-    if (!customLotPts || customLotPts.length < 3) return null;
-    
-    const inset = insetPolygonBisector(customLotPts, ogucParams.minSetback, meshData, n);
-    console.log('inset result:', inset, 'minSetback:', ogucParams.minSetback);
-    if (!inset) return { pts: [], height: 0, collapsed: true };
-    
-    const pts = inset.map(p => ({
-      x: p.x,
-      y: p.y,
-      elev: getGridElevAt(p.x, p.y) ?? (meshData?.minEv || 0)
-    }));
-    const calcHeight = ogucParams.minSetback * Math.tan(ogucParams.angle * Math.PI / 180);
-    const height = Math.min(calcHeight, ogucParams.maxHeight);
-    
-    return { pts, height, collapsed: false };
-  }, [n, m, analysisMode, ogucParams, meshData, dragOffset, customLotPts]);
-
-  // ConvHull helper for shadows
-  const convexHull = (points: { x: number, y: number, elev: number }[]) => {
-    if (points.length <= 3) return points;
-    const pts = [...points].sort((a, b) => a.x === b.x ? a.y - b.y : a.x - b.x);
-    const cross = (o: any, a: any, b: any) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-    const lower = [];
-    for (let i = 0; i < pts.length; i++) {
-      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], pts[i]) <= 0) lower.pop();
-      lower.push(pts[i]);
+    if (!ogucModel) return null;
+    if (ogucModel.collapsed || ogucModel.tiers.length === 0) {
+      return { pts: [], height: 0, collapsed: true };
     }
-    const upper = [];
-    for (let i = pts.length - 1; i >= 0; i--) {
-      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], pts[i]) <= 0) upper.pop();
-      upper.push(pts[i]);
-    }
-    upper.pop(); lower.pop();
-    return lower.concat(upper);
-  };
+    const primaryTier =
+      ogucModel.tiers.find((t) => t.id === 'main') || ogucModel.tiers[ogucModel.tiers.length - 1];
+    return {
+      pts: primaryTier.basePts,
+      height: ogucModel.effectiveHeight,
+      collapsed: false,
+    };
+  }, [ogucModel]);
 
   const getSolarShadowPolygon = (pts: { x: number, y: number, elev: number }[], height: number) => {
     if (!sunPosition || sunPosition.elevation <= 0.5) return null; // Solo dibuja si está sobre el horizonte
@@ -786,44 +815,11 @@ export default function ContourViewer({
     });
 
     const allPts = [...pts.map(p => ({ ...p, elev: p.elev })), ...projectedPts];
-    return convexHull(allPts);
+    return convexHull3D(allPts);
   };
 
-  const getOgucShadowPolygon = (pts: { x: number, y: number, elev: number }[], height: number, angleDeg: number, orientation: number) => {
-    const angleRad = angleDeg * Math.PI / 180;
-    const Vz = Math.tan(angleRad);
-    const Vx = Math.sin(orientation * Math.PI / 180);
-    const Vy = -Math.cos(orientation * Math.PI / 180);
-
-    const projectedPts = pts.map(p => {
-      const z0 = meshData?.minEv || 0;
-      const dz = (p.elev + height) - z0;
-      const t = dz / Vz;
-      const realDx = Vx * t;
-      const realDy = Vy * t;
-      const mapDx = meshData ? (realDx / meshData.w) * n : realDx;
-      const mapDy = meshData ? (realDy / meshData.h) * m : realDy;
-      return { x: p.x + mapDx, y: p.y + mapDy, elev: z0 };
-    });
-
-    const allPts = [...pts.map(p => ({ ...p, elev: meshData?.minEv || 0 })), ...projectedPts];
-    return convexHull(allPts);
-  };
-
-  const polygonArea = (pts: { x: number, y: number }[]) => {
-    if (!pts || pts.length < 3) return 0;
-    let area = 0;
-    const w = meshData?.w || 100;
-    const h = meshData?.h || 100;
-    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-      const x1 = (pts[i].x / n) * w;
-      const y1 = (pts[i].y / m) * h;
-      const x2 = (pts[j].x / n) * w;
-      const y2 = (pts[j].y / m) * h;
-      area += (x2 + x1) * (y2 - y1);
-    }
-    return Math.abs(area / 2);
-  };
+  const polygonArea = (pts: { x: number, y: number }[]) =>
+    computePolygonAreaM2(pts, meshData, n, m);
 
   const render3DPath = (pts: { x: number, y: number, elev: number }[], close: boolean = false) => {
     if (pts.length === 0) return "";
@@ -1234,62 +1230,32 @@ export default function ContourViewer({
       <svg
         ref={svgRef}
         viewBox="-180 -200 360 400"
-        className={`w-full h-full object-contain origin-center overflow-visible z-10 drop-shadow-[0_0_15px_rgba(197,160,89,0.15)] ${isDrawingLot ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
+        preserveAspectRatio="xMidYMid meet"
+        className={`w-full h-full origin-center overflow-visible z-10 drop-shadow-[0_0_15px_rgba(197,160,89,0.15)] ${isDrawingLot ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
         onPointerDown={(e) => {
           if (isDrawingLot) {
-            if (isPerspective) {
-               alert("El dibujo de lote está disponible en vista Planta.");
-               if (setIsDrawingLot) setIsDrawingLot(false);
-               return;
-            }
+            if (e.button !== 0) return;
             e.preventDefault();
             e.stopPropagation();
-            
-            if (!zoomGroupRef.current) return;
-            const pt = d3.pointer(e.nativeEvent, zoomGroupRef.current);
-            const svgX = pt[0];
-            const svgY = pt[1];
-            
-            const pitch = isPerspective ? rotation.x : 0;
-            const yaw = isPerspective ? rotation.z : 0;
-            const radPitch = (pitch * Math.PI) / 180;
-            const radYaw = (yaw * Math.PI) / 180;
-            const cosP = Math.cos(radPitch);
-            const sinP = Math.sin(radPitch);
-            const cosY = Math.cos(radYaw);
-            const sinY = Math.sin(radYaw);
-            const a = cosY;
-            const b = sinY * cosP;
-            const c = -sinY;
-            const d = cosY * cosP;
-            const det = a * d - b * c;
-            if (det === 0) return;
-            
-            const cx = (n - 1) / 2;
-            const cy = (m - 1) / 2;
-            const eT = -a * cx - c * cy;
-            const fT = -b * cx - d * cy;
-            
-            const gridX = (d * (svgX - eT) - c * (svgY - fT)) / det;
-            const gridY = (a * (svgY - fT) - b * (svgX - eT)) / det;
-            
-            const elev = getGridElevAt(gridX, gridY) ?? (meshData?.minEv || 0);
 
-            if (e.detail === 2) {
+            const gridPt = screenToGrid(e.clientX, e.clientY);
+            if (!gridPt) return;
+
+            // Doble clic cierra el polígono
+            if (e.detail >= 2 && customLotPts && customLotPts.length >= 3) {
               if (setIsDrawingLot) setIsDrawingLot(false);
               setDrawingCursor(null);
               return;
             }
 
-            if (customLotPts && customLotPts.length >= 2) {
+            // Si hace clic cerca del primer vértice y ya hay >= 3 puntos, cierra el polígono
+            if (customLotPts && customLotPts.length >= 3 && svgRef.current) {
               const transform = d3.zoomTransform(svgRef.current as any);
               const firstPt = customLotPts[0];
               const firstProj = projectPoint(firstPt.x, firstPt.y, firstPt.elev);
-              const currProj = projectPoint(gridX, gridY, elev);
-              const dist = Math.sqrt(
-                Math.pow(currProj.X - firstProj.X, 2) +
-                Math.pow(currProj.Y - firstProj.Y, 2)
-              ) * transform.k;
+              const currProj = projectPoint(gridPt.x, gridPt.y, gridPt.elev);
+              const dist =
+                Math.hypot(currProj.X - firstProj.X, currProj.Y - firstProj.Y) * transform.k;
               if (dist < 10) {
                 if (setIsDrawingLot) setIsDrawingLot(false);
                 setDrawingCursor(null);
@@ -1298,7 +1264,7 @@ export default function ContourViewer({
             }
 
             const newPts = customLotPts ? [...customLotPts] : [];
-            newPts.push({ x: gridX, y: gridY, elev });
+            newPts.push(gridPt);
             if (setCustomLotPts) setCustomLotPts(newPts);
           } else {
             handlePointerDown(e);
@@ -1306,36 +1272,10 @@ export default function ContourViewer({
         }}
         onPointerMove={(e) => {
           if (isDrawingLot) {
-            if (!zoomGroupRef.current) return;
-            const pt = d3.pointer(e.nativeEvent, zoomGroupRef.current);
-            const svgX = pt[0];
-            const svgY = pt[1];
-
-            const pitch = isPerspective ? rotation.x : 0;
-            const yaw = isPerspective ? rotation.z : 0;
-            const radPitch = (pitch * Math.PI) / 180;
-            const radYaw = (yaw * Math.PI) / 180;
-            const cosP = Math.cos(radPitch);
-            const sinP = Math.sin(radPitch);
-            const cosY = Math.cos(radYaw);
-            const sinY = Math.sin(radYaw);
-            const a = cosY;
-            const b = sinY * cosP;
-            const c = -sinY;
-            const d = cosY * cosP;
-            const det = a * d - b * c;
-            if (det === 0) return;
-            
-            const cx = (n - 1) / 2;
-            const cy = (m - 1) / 2;
-            const eT = -a * cx - c * cy;
-            const fT = -b * cx - d * cy;
-            
-            const gridX = (d * (svgX - eT) - c * (svgY - fT)) / det;
-            const gridY = (a * (svgY - fT) - b * (svgX - eT)) / det;
-            const elev = getGridElevAt(gridX, gridY) ?? (meshData?.minEv || 0);
-            
-            setDrawingCursor({ x: gridX, y: gridY });
+            const gridPt = screenToGrid(e.clientX, e.clientY);
+            if (gridPt) {
+              setDrawingCursor({ x: gridPt.x, y: gridPt.y });
+            }
           } else {
             handlePointerMove(e);
           }
@@ -1394,22 +1334,17 @@ export default function ContourViewer({
             let labelAngle = 0;
             if (isMajor && !isPerspective && c.coordinates.length > 0) {
               try {
-                // c.coordinates for MultiPolygon is: [ [ [ [x,y], [x,y]... ] ] ]
                 const firstPoly = c.coordinates[0] as any[];
                 if (firstPoly && firstPoly.length > 0) {
-                  // The exterior ring
                   const ring = firstPoly[0];
                   if (ring && ring.length > 10) {
-                    // Stagger the label position along the ring based on contour index 'i'
-                    // This prevents all labels from aligning perfectly in a straight line
-                    const factor = 0.15 + ((i % 5) * 0.15); // 15%, 30%, 45%, 60%, 75%
+                    const factor = 0.15 + ((i % 5) * 0.15);
                     const midIdx = Math.floor(ring.length * factor);
                     const pt1 = ring[midIdx];
                     const pt2 = ring[midIdx + 1];
                     if (pt1 && pt2 && typeof pt1[0] === 'number') {
                       labelPt = { X: pt1[0], Y: pt1[1] };
                       labelAngle = Math.atan2(pt2[1] - pt1[1], pt2[0] - pt1[0]) * (180 / Math.PI);
-                      // Make text upright
                       if (labelAngle > 90 || labelAngle < -90) labelAngle += 180;
                     }
                   }
@@ -1498,17 +1433,11 @@ export default function ContourViewer({
           {/* Huellas de Edificios de Contexto OSM */}
           {layerVisibility.buildings && buildings3D.map((obj, i) => {
             const { pts, height } = obj;
-            const baseElev = meshData?.minEv || 0;
             const roofPts = pts.map(p => ({ ...p, elev: p.elev + height }));
-
-            const pathFloor = render3DPath(pts.map(p => ({ ...p, elev: baseElev })), true);
-            const pathBase = render3DPath(pts, true);
             const pathRoof = render3DPath(roofPts, true);
 
             return (
               <g key={`b-group-${i}`}>
-                {/* Sombra removida */}
-
                 {/* Paredes de los edificios (extrusión 2.5D) */}
                 {isPerspective && pts.map((p, j) => {
                   const pNext = pts[(j + 1) % pts.length];
@@ -1544,113 +1473,97 @@ export default function ContourViewer({
             );
           })}
 
-          {/* MODO OGUC: Lote y Proyecto */}
-          {analysisMode === 'oguc' && lotPolygon && projectVolume && ogucParams && (
+          {/* MODO OGUC: Sombras Comparativas (Módulo 3), Lote, Rasantes (Módulo 2) y Volumen Escalonado */}
+          {analysisMode === 'oguc' && ogucModel && (
             <g>
-              {/* Sombras OGUC: Proyecto */}
-              {ogucParams.showShadows && [135, 180, 225].map((angle, k) => {
-                const shadow = getOgucShadowPolygon(projectVolume.pts, projectVolume.height, ogucParams.angle, angle);
-                return shadow && (
-                  <path
-                    key={`oguc-shadow-${k}`}
-                    d={render3DPath(shadow, true)}
-                    fill="#ef4444"
-                    fillOpacity="0.2"
-                    stroke="#ef4444"
-                    strokeWidth={0.3}
-                    strokeOpacity="0.5"
-                    vectorEffect="non-scaling-stroke"
-                    className="pointer-events-none"
-                  />
-                );
-              })}
-
-              {/* Lote (y Previsualización del Lote Dibujado) */}
-              {(isDrawingLot && customLotPts && customLotPts.length >= 1 && drawingCursor) ? (
-                <g>
-                   <path
-                     d={render3DPath([...customLotPts, ...(drawingCursor ? [{ x: drawingCursor.x, y: drawingCursor.y, elev: getGridElevAt(drawingCursor.x, drawingCursor.y) ?? (meshData?.minEv || 0) }] : [])], false)}
-                     fill="none"
-                     stroke="#ec4899"
-                     strokeWidth="1.5"
-                     strokeDasharray="1,1"
-                     vectorEffect="non-scaling-stroke"
-                   />
-                   {customLotPts.map((pt, i) => {
-                     const proj = projectPoint(pt.x, pt.y, pt.elev);
-                     return (
-                       <circle key={i} cx={proj.X} cy={proj.Y} r={0.2} fill="#ec4899" vectorEffect="non-scaling-stroke" />
-                     )
-                   })}
+              {/* 1. SOMBRAS COMPARATIVAS (MÓDULO 3): Sombra Teórica Permitida (Cian) vs Sombra Propuesta (Rojo/Magenta) */}
+              {activeOgucParams.showShadows && !ogucModel.collapsed && (
+                <g className="oguc-comparative-shadows pointer-events-none">
+                  {/* Sombra Teórica Normativa (Envolvente máxima permitida) - Azul/Cian */}
+                  {ogucModel.shadows.theoreticalPolygons.map((shadowPoly, k) => (
+                    <path
+                      key={`oguc-theo-shadow-${k}`}
+                      d={render3DPath(shadowPoly, true)}
+                      fill="#06b6d4"
+                      fillOpacity="0.16"
+                      stroke="#38bdf8"
+                      strokeWidth={1.1}
+                      strokeDasharray="3,2"
+                      strokeOpacity="0.85"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  ))}
+                  {/* Sombra del Volumen Propuesto - Rojo/Magenta */}
+                  {ogucModel.shadows.proposedPolygons.map((shadowPoly, k) => (
+                    <path
+                      key={`oguc-prop-shadow-${k}`}
+                      d={render3DPath(shadowPoly, true)}
+                      fill="#f43f5e"
+                      fillOpacity="0.24"
+                      stroke="#ef4444"
+                      strokeWidth={1.1}
+                      strokeOpacity="0.85"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  ))}
                 </g>
-              ) : lotPolygon ? (
-                <path
-                  d={render3DPath(lotPolygon, true)}
-                  fill="none"
-                  stroke="#ec4899"
-                  strokeWidth={1}
-                  strokeDasharray="3,2"
-                  vectorEffect="non-scaling-stroke"
-                />
-              ) : null}
+              )}
 
-              {/* Volumen Proyecto */}
-              {(() => {
-                if (analysisMode !== 'oguc' || !projectVolume || projectVolume.collapsed) return null;
-                const { pts, height } = projectVolume;
-                if (pts.length < 3) return null;
-                const rawRoofPts = pts.map(p => ({ ...p, elev: p.elev + height }));
-                const flatRoofElev = Math.min(...rawRoofPts.map(p => p.elev));
-                const roofPts = pts.map(p => ({ ...p, elev: flatRoofElev }));
-                
-                const isPointInPolygon = (pt: {x: number, y: number}, polygon: {x: number, y: number}[]) => {
-                  let inside = false;
-                  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-                    const xi = polygon[i].x, yi = polygon[i].y;
-                    const xj = polygon[j].x, yj = polygon[j].y;
-                    const intersect = ((yi > pt.y) !== (yj > pt.y))
-                        && (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi);
-                    if (intersect) inside = !inside;
-                  }
-                  return inside;
-                };
+              {/* 2. POLÍGONO DE LOTE */}
+              {!isDrawingLot && ogucModel.lotPolygon.length >= 3 && (
+                <g>
+                  <path
+                    d={render3DPath(ogucModel.lotPolygon, true)}
+                    fill="#ec4899"
+                    fillOpacity="0.05"
+                    stroke="#ec4899"
+                    strokeWidth={1.4}
+                    strokeDasharray="4,2"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                  {ogucModel.lotPolygon.map((pt, idx) => {
+                    const proj = projectPoint(pt.x, pt.y, pt.elev);
+                    return (
+                      <circle
+                        key={`lot-v-${idx}`}
+                        cx={proj.X}
+                        cy={proj.Y}
+                        r={1.1 / Math.max(0.5, zoomK)}
+                        fill="#ec4899"
+                      />
+                    );
+                  })}
+                </g>
+              )}
 
+              {/* 3. VOLUMEN PROPUESTO (CON ESCALONAMIENTO ART. 2.6.12 Y PLACA CONTINUA) + ARRASTRE REACTIVO */}
+              {!ogucModel.collapsed && ogucModel.tiers.length > 0 && (() => {
                 const handleVolumePointerDown = (e: React.PointerEvent) => {
-                  if (isDrawingLot || (customLotPts && customLotPts.length > 0)) return; // No independiente si hay lote dibujado
-                  
+                  if (isDrawingLot || e.button !== 0) return;
                   e.stopPropagation();
+
+                  const startGrid = screenToGrid(e.clientX, e.clientY);
+                  if (!startGrid) return;
+
                   isDraggingVolumeRef.current = true;
-                  dragStartRef.current = { cx: e.clientX, cy: e.clientY, ox: dragOffset.x, oy: dragOffset.y };
-                  
+                  dragStartRef.current = {
+                    cx: startGrid.x,
+                    cy: startGrid.y,
+                    ox: dragOffset.x,
+                    oy: dragOffset.y,
+                  };
+
                   const handleMove = (ev: PointerEvent) => {
                     if (!isDraggingVolumeRef.current) return;
-                    const transform = d3.zoomTransform(svgRef.current as any);
-                    const zK = transform.k;
-                    const dX = (ev.clientX - dragStartRef.current.cx) / zK;
-                    const dY = (ev.clientY - dragStartRef.current.cy) / zK;
+                    const currGrid = screenToGrid(ev.clientX, ev.clientY);
+                    if (!currGrid) return;
 
-                    let pitch = isPerspective ? rotation.x : 0;
-                    let yaw = isPerspective ? rotation.z : 0;
-                    const radPitch = (pitch * Math.PI) / 180;
-                    const radYaw = (yaw * Math.PI) / 180;
-                    const cosP = Math.cos(radPitch);
-                    const sinP = Math.sin(radPitch);
-                    const cosY = Math.cos(radYaw);
-                    const sinY = Math.sin(radYaw);
-                    const a = cosY;
-                    const b = sinY * cosP;
-                    const c = -sinY;
-                    const d = cosY * cosP;
-                    
-                    const det = a * d - b * c;
-                    if (det === 0) return;
-
-                    const dx = (d * dX - c * dY) / det;
-                    const dy = (a * dY - b * dX) / det;
+                    const dx = currGrid.x - dragStartRef.current.cx;
+                    const dy = currGrid.y - dragStartRef.current.cy;
 
                     setDragOffset({
                       x: dragStartRef.current.ox + dx,
-                      y: dragStartRef.current.oy + dy
+                      y: dragStartRef.current.oy + dy,
                     });
                   };
 
@@ -1664,72 +1577,254 @@ export default function ContourViewer({
                   window.addEventListener('pointerup', handleUp);
                 };
 
-                const cxBase = pts.reduce((sum, p) => sum + p.x, 0) / pts.length;
-                const cyBase = pts.reduce((sum, p) => sum + p.y, 0) / pts.length;
-
                 return (
-                  <g onPointerDown={handleVolumePointerDown} className={(!customLotPts || customLotPts.length === 0) && !isDrawingLot ? 'cursor-grab active:cursor-grabbing' : ''}>
-                    {isPerspective && pts.map((p, j) => {
-                      const pNext = pts[(j + 1) % pts.length];
-                      const rNext = roofPts[(j + 1) % pts.length];
-                      const rp = roofPts[j];
-                      
-                      const midX = (p.x + pNext.x) / 2;
-                      const midY = (p.y + pNext.y) / 2;
-                      const dx = midX - cxBase;
-                      const dy = midY - cyBase;
+                  <g
+                    onPointerDown={handleVolumePointerDown}
+                    className={!isDrawingLot ? 'cursor-grab active:cursor-grabbing' : ''}
+                  >
+                    {ogucModel.tiers.map((tier) => {
+                      const { basePts, roofPts, id } = tier;
+                      if (basePts.length < 3) return null;
 
-                      let fillColor = "#b45309"; // Oriente/Poniente
-                      let fillOpacity = "0.6";
-                      let strokeColor = "#f59e0b";
+                      const cxBase = basePts.reduce((s, p) => s + p.x, 0) / basePts.length;
+                      const cyBase = basePts.reduce((s, p) => s + p.y, 0) / basePts.length;
 
-                      if (Math.abs(dy) > Math.abs(dx)) {
-                        if (dy > 0) {
-                          // Sur (+Y)
-                          fillColor = "#92400e";
-                          fillOpacity = "0.85";
-                          strokeColor = "#f59e0b";
-                        } else {
-                          // Norte (-Y)
-                          fillColor = "#fbbf24";
-                          fillOpacity = "0.3";
-                          strokeColor = "#f59e0b";
+                      const isUpper = id === 'upper_stepped';
+                      const isContinuous = id === 'continuous';
+
+                      // Build wall quads and sort back-to-front in perspective
+                      const walls = basePts.map((p, j) => {
+                        const pNext = basePts[(j + 1) % basePts.length];
+                        const rNext = roofPts[(j + 1) % roofPts.length];
+                        const rp = roofPts[j];
+
+                        const midX = (p.x + pNext.x) / 2;
+                        const midY = (p.y + pNext.y) / 2;
+                        const dx = midX - cxBase;
+                        const dy = midY - cyBase;
+
+                        let fillColor = isUpper ? '#d97706' : isContinuous ? '#64748b' : '#b45309'; // Oriente/Poniente
+                        let fillOpacity = isContinuous ? '0.45' : '0.68';
+                        const strokeColor = isUpper ? '#fcd34d' : isContinuous ? '#94a3b8' : '#f59e0b';
+
+                        if (Math.abs(dy) >= Math.abs(dx)) {
+                          if (dy >= 0) {
+                            // Cara Sur (+Y): más oscura para enfatizar orientación
+                            fillColor = isUpper ? '#78350f' : isContinuous ? '#334155' : '#92400e';
+                            fillOpacity = '0.88';
+                          } else {
+                            // Cara Norte (-Y): más iluminada
+                            fillColor = isUpper ? '#fde68a' : isContinuous ? '#94a3b8' : '#fbbf24';
+                            fillOpacity = '0.42';
+                          }
                         }
+
+                        const projMid = projectPoint(midX, midY, (p.elev + rp.elev) / 2);
+                        return {
+                          j,
+                          quad: [p, pNext, rNext, rp],
+                          fillColor,
+                          fillOpacity,
+                          strokeColor,
+                          depthY: projMid.Y,
+                        };
+                      });
+
+                      if (isPerspective) {
+                        walls.sort((a, b) => a.depthY - b.depthY);
                       }
 
                       return (
-                        <path
-                          key={j}
-                          d={render3DPath([p, pNext, rNext, rp], true)}
-                          fill={fillColor}
-                          fillOpacity={fillOpacity}
-                          stroke={strokeColor}
-                          strokeWidth="0.5"
-                        />
+                        <g key={`tier-${id}`}>
+                          {isPerspective &&
+                            walls.map((w) => (
+                              <path
+                                key={`wall-${id}-${w.j}`}
+                                d={render3DPath(w.quad, true)}
+                                fill={w.fillColor}
+                                fillOpacity={w.fillOpacity}
+                                stroke={w.strokeColor}
+                                strokeWidth="0.6"
+                                vectorEffect="non-scaling-stroke"
+                              />
+                            ))}
+                          <path
+                            d={render3DPath(roofPts, true)}
+                            fill={isUpper ? '#fbbf24' : isContinuous ? '#94a3b8' : '#f59e0b'}
+                            fillOpacity={isContinuous ? '0.35' : '0.75'}
+                            stroke={isUpper ? '#fef08a' : '#f59e0b'}
+                            strokeWidth={isUpper ? 1.2 : 0.9}
+                            vectorEffect="non-scaling-stroke"
+                          />
+                        </g>
                       );
-                    })}
-                    <path
-                      d={render3DPath(roofPts, true)}
-                      fill="#f59e0b"
-                      fillOpacity="0.7"
-                      stroke="#f59e0b"
-                      strokeWidth={0.5}
-                      vectorEffect="non-scaling-stroke"
-                    />
-                    {roofPts.map((rp, k) => {
-                      const proj = projectPoint(rp.x, rp.y, rp.elev);
-                      return <circle key={`v-${k}`} cx={proj.X} cy={proj.Y} r={0.3} fill="#f59e0b" vectorEffect="non-scaling-stroke" />;
                     })}
                   </g>
                 );
               })()}
+
+              {/* 4. PLANOS DE RASANTES REALES INCLINADOS (MÓDULO 2 - Art. 2.6.3) */}
+              {!ogucModel.collapsed && ogucModel.rasantePlanes.length > 0 && (
+                <g className="oguc-rasante-planes pointer-events-none">
+                  {ogucModel.rasantePlanes.map((plane, idx) => {
+                    const isSur = plane.orientation === 'Sur';
+                    const planeColor = isSur ? '#f97316' : '#38bdf8';
+                    const quad = [plane.p1, plane.p2, plane.top2, plane.top1];
+                    const midLabelPt = projectPoint(
+                      plane.midBase.x,
+                      plane.midBase.y,
+                      plane.midBase.elev
+                    );
+                    return (
+                      <g key={`rasante-plane-${idx}`}>
+                        {/* Línea vertical de arranque de rasante desde el suelo (rasanteStartHeight) */}
+                        {isPerspective && activeOgucParams.rasanteStartHeight > 0 && (
+                          <>
+                            <path
+                              d={render3DPath(
+                                [
+                                  {
+                                    x: plane.p1.x,
+                                    y: plane.p1.y,
+                                    elev: plane.p1.elev - activeOgucParams.rasanteStartHeight,
+                                  },
+                                  plane.p1,
+                                ],
+                                false
+                              )}
+                              fill="none"
+                              stroke="#ec4899"
+                              strokeWidth="0.7"
+                              strokeDasharray="1,1"
+                              vectorEffect="non-scaling-stroke"
+                            />
+                            <path
+                              d={render3DPath([plane.p1, plane.p2], false)}
+                              fill="none"
+                              stroke={planeColor}
+                              strokeWidth="1"
+                              strokeOpacity="0.8"
+                              vectorEffect="non-scaling-stroke"
+                            />
+                          </>
+                        )}
+                        {/* Plano inclinado de rasante */}
+                        {isPerspective && (
+                          <path
+                            d={render3DPath(quad, true)}
+                            fill={planeColor}
+                            fillOpacity="0.11"
+                            stroke={planeColor}
+                            strokeWidth="0.9"
+                            strokeDasharray="3,2"
+                            strokeOpacity="0.75"
+                            vectorEffect="non-scaling-stroke"
+                          />
+                        )}
+                        {/* Etiqueta de ángulo y orientación por fachada */}
+                        <text
+                          x={midLabelPt.X}
+                          y={midLabelPt.Y}
+                          fill={planeColor}
+                          fontSize={Math.max(1.8, 3.2 / Math.sqrt(Math.max(0.5, zoomK)))}
+                          fontFamily="monospace"
+                          fontWeight="bold"
+                          textAnchor="middle"
+                          dy="-1.5"
+                          style={{ textShadow: '0px 0px 2px var(--theme-bg-base)' }}
+                        >
+                          {plane.orientation} {plane.angleDeg}°
+                        </text>
+                      </g>
+                    );
+                  })}
+                </g>
+              )}
+            </g>
+          )}
+
+          {/* MODO DIBUJO LIBRE DE LOTE: Previsualización interactiva desde el 1er vértice (Prioridad 1) */}
+          {isDrawingLot && (
+            <g className="lot-drawing-overlay pointer-events-none">
+              {customLotPts && customLotPts.length >= 1 && (
+                <>
+                  <path
+                    d={render3DPath(
+                      [
+                        ...customLotPts,
+                        ...(drawingCursor
+                          ? [
+                              {
+                                x: drawingCursor.x,
+                                y: drawingCursor.y,
+                                elev:
+                                  getGridElevAt(drawingCursor.x, drawingCursor.y) ??
+                                  (meshData?.minEv || 0),
+                              },
+                            ]
+                          : []),
+                      ],
+                      false
+                    )}
+                    fill="rgba(236, 72, 153, 0.12)"
+                    stroke="#ec4899"
+                    strokeWidth="1.8"
+                    strokeDasharray="3,2"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                  {customLotPts.map((pt, i) => {
+                    const proj = projectPoint(pt.x, pt.y, pt.elev);
+                    const isFirst = i === 0 && customLotPts.length >= 3;
+                    return (
+                      <g key={`draw-pt-${i}`}>
+                        {isFirst && (
+                          <circle
+                            cx={proj.X}
+                            cy={proj.Y}
+                            r={3.2 / Math.max(0.5, zoomK)}
+                            fill="none"
+                            stroke="#ec4899"
+                            strokeWidth="1"
+                            vectorEffect="non-scaling-stroke"
+                          />
+                        )}
+                        <circle
+                          cx={proj.X}
+                          cy={proj.Y}
+                          r={1.4 / Math.max(0.5, zoomK)}
+                          fill={isFirst ? '#fff' : '#ec4899'}
+                          stroke="#ec4899"
+                          strokeWidth="1"
+                          vectorEffect="non-scaling-stroke"
+                        />
+                      </g>
+                    );
+                  })}
+                </>
+              )}
+              {drawingCursor && (
+                (() => {
+                  const cElev =
+                    getGridElevAt(drawingCursor.x, drawingCursor.y) ?? (meshData?.minEv || 0);
+                  const cProj = projectPoint(drawingCursor.x, drawingCursor.y, cElev);
+                  return (
+                    <circle
+                      cx={cProj.X}
+                      cy={cProj.Y}
+                      r={1.2 / Math.max(0.5, zoomK)}
+                      fill="#ec4899"
+                      opacity="0.85"
+                    />
+                  );
+                })()
+              )}
             </g>
           )}
 
           {/* MODO SOLAR: Proyecto y Arco Solar */}
           {analysisMode === 'solar' && (
             <g>
-              {projectVolume && solarParams?.showShadows && (() => {
+              {projectVolume && !projectVolume.collapsed && solarParams?.showShadows && (() => {
                 const shadow = getSolarShadowPolygon(projectVolume.pts, projectVolume.height);
                 return shadow && (
                   <path
@@ -1741,17 +1836,26 @@ export default function ContourViewer({
                 );
               })()}
 
-              {/* Volumen Demo */}
-              {projectVolume && (() => {
-                const { pts, height } = projectVolume;
-                const roofPts = pts.map(p => ({ ...p, elev: p.elev + height }));
-                const pathRoof = render3DPath(roofPts, true);
+              {/* Lote y Volumen en Modo Solar */}
+              {lotPolygon && (
+                <path
+                  d={render3DPath(lotPolygon, true)}
+                  fill="none"
+                  stroke="#ec4899"
+                  strokeWidth={1}
+                  strokeDasharray="3,2"
+                  vectorEffect="non-scaling-stroke"
+                />
+              )}
 
+              {ogucModel && !ogucModel.collapsed && ogucModel.tiers.map((tier) => {
+                const { basePts, roofPts, id } = tier;
+                const pathRoof = render3DPath(roofPts, true);
                 return (
-                  <g>
-                    {isPerspective && pts.map((p, j) => {
-                      const pNext = pts[(j + 1) % pts.length];
-                      const rNext = roofPts[(j + 1) % pts.length];
+                  <g key={`solar-tier-${id}`}>
+                    {isPerspective && basePts.map((p, j) => {
+                      const pNext = basePts[(j + 1) % basePts.length];
+                      const rNext = roofPts[(j + 1) % roofPts.length];
                       const rp = roofPts[j];
                       return (
                         <path
@@ -1761,6 +1865,7 @@ export default function ContourViewer({
                           fillOpacity="0.5"
                           stroke="#f59e0b"
                           strokeWidth="0.5"
+                          vectorEffect="non-scaling-stroke"
                         />
                       );
                     })}
@@ -1770,10 +1875,11 @@ export default function ContourViewer({
                       fillOpacity="0.7"
                       stroke="#f59e0b"
                       strokeWidth="1"
+                      vectorEffect="non-scaling-stroke"
                     />
                   </g>
                 );
-              })()}
+              })}
 
               {/* Heliodon: Guías (Horizonte, Elevaciones, Meridiano) en PERSPECTIVA */}
               {isPerspective && heliodonGuides && (
@@ -1810,7 +1916,6 @@ export default function ContourViewer({
                   ))}
                   {(() => {
                     const p = projectPoint(currentSunPos.x, currentSunPos.y, currentSunPos.elev);
-                    // Dibuja el sol solo si está sobre el horizonte
                     if (sunPosition && sunPosition.elevation > 0) {
                       return (
                         <g transform={`translate(${p.X}, ${p.Y})`}>
@@ -1868,43 +1973,6 @@ export default function ContourViewer({
             )}
           </g>
         )}
-
-        {/* Info HUD */}
-        {analysisMode === 'oguc' && lotPolygon && projectVolume && ogucParams && (
-            <div className="absolute bottom-4 left-4 bg-bg-surface/80 backdrop-blur-md border border-border-main p-3 rounded-md text-[10px] uppercase font-mono tracking-widest text-text-main flex flex-col gap-2 min-w-[250px] shadow-lg pointer-events-none">
-              <div className="border-b border-border-strong pb-2 mb-1 flex justify-between items-center">
-                <span className="text-accent font-bold">Análisis Normativo OGUC</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 bg-[#ec4899] inline-block rounded-sm"></span>
-                <span>Polígono de Lote</span>
-                <span className="ml-auto text-text-faded">{polygonArea(lotPolygon).toFixed(0)} m²</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 bg-accent inline-block rounded-sm"></span>
-                <span>Volumen Propuesto</span>
-                <span className="ml-auto text-text-faded font-bold">h = {projectVolume.height.toFixed(1)}m</span>
-              </div>
-              <div className="flex items-center gap-2 mt-1 pt-1 border-t border-border-faded">
-                <span className="text-text-subtle">Ángulo Rasante Base</span>
-                <span className="ml-auto text-text-faded">{ogucParams.angle}º</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-text-subtle">Distanciamiento Aplicado</span>
-                <span className="ml-auto text-text-faded">{ogucParams.minSetback}m</span>
-              </div>
-              {projectVolume.collapsed && (
-                <div className="mt-2 text-[#ef4444] leading-tight">
-                  <span className="font-bold">Aviso:</span> Distanciamiento mayor al tamaño del lote. Reduce el valor para generar el volumen.
-                </div>
-              )}
-              {!projectVolume.collapsed && (
-                <div className="mt-2 text-text-subtle text-[8px] leading-tight opacity-75">
-                  PARA SIMPLIFICACIÓN DOCENTE SE<br/>CONSIDERA VOLUMEN TEÓRICO BASADO EN<br/>ÁNGULO RASANTE Y DISTANCIAMIENTO UNIFORME.
-                </div>
-              )}
-            </div>
-          )}
       </svg>
 
       {/* HUD Metrics & Bottom Controls */}
@@ -1917,11 +1985,11 @@ export default function ContourViewer({
               Proyección: {isPerspective ? 'Caballete Isométrica 2.5D' : 'Ortogonal 2D (Planta)'}
             </span>
             <span className="text-[10px] text-text-faded uppercase tracking-widest font-mono bg-bg-base/90 px-2 py-1 rounded-sm border border-border-main backdrop-blur-sm transition-colors duration-300 text-accent">
-              Zoom/Pan: Scroll y Arrastrar
+              {isDrawingLot ? 'Modo Dibujo: Clic para vértices • Doble clic o 1er punto para cerrar' : 'Zoom/Pan: Scroll y Arrastrar • Volumen arrastrable'}
             </span>
           </div>
 
-          <div className="bg-bg-surface/95 border border-border-main p-3 rounded-sm backdrop-blur-sm shadow-lg w-64 mt-2 pointer-events-auto">
+          <div className="bg-bg-surface/95 border border-border-main p-3 rounded-sm backdrop-blur-sm shadow-lg w-72 mt-2 pointer-events-auto">
             {analysisMode === 'topographic' && (
               <>
                 <h3 className="text-[10px] font-bold text-accent uppercase tracking-widest mb-2 border-b border-border-main pb-1">Leyenda Topográfica</h3>
@@ -1949,31 +2017,89 @@ export default function ContourViewer({
               </>
             )}
 
-            {analysisMode === 'oguc' && (
+            {analysisMode === 'oguc' && ogucModel && (
               <>
-                <h3 className="text-[10px] font-bold text-accent uppercase tracking-widest mb-2 border-b border-border-main pb-1">Análisis Normativo OGUC</h3>
+                <div className="flex justify-between items-center mb-2 border-b border-border-main pb-1">
+                  <h3 className="text-[10px] font-bold text-accent uppercase tracking-widest">Análisis Normativo OGUC</h3>
+                  <span className="text-[8px] font-mono px-1.5 py-0.5 rounded-xs bg-accent/15 text-accent font-bold">
+                    {ogucModel.regionInfo.name}
+                  </span>
+                </div>
                 <div className="space-y-1.5">
                   <div className="flex justify-between items-center text-[9px] font-mono text-text-main">
-                    <span className="flex items-center gap-1.5"><div className="w-3 h-3 bg-[#ec4899] border border-[#ec4899]"></div> Polígono de Lote</span>
+                    <span className="flex items-center gap-1.5">
+                      <div className="w-2.5 h-2.5 bg-[#ec4899]/30 border border-[#ec4899]"></div> Polígono de Lote
+                    </span>
+                    <span className="font-bold">{Math.round(ogucModel.lotAreaM2)} m²</span>
                   </div>
                   <div className="flex justify-between items-center text-[9px] font-mono text-text-main">
-                    <span className="flex items-center gap-1.5"><div className="w-3 h-3 bg-[#ef4444] opacity-50 border border-[#ef4444]"></div> Volumen Propuesto</span>
-                    <span>h = {ogucParams?.maxHeight}m</span>
+                    <span className="flex items-center gap-1.5">
+                      <div className="w-2.5 h-2.5 bg-[#f59e0b]/70 border border-[#f59e0b]"></div> Volumen Propuesto
+                    </span>
+                    <span className="font-bold">h = {ogucModel.effectiveHeight.toFixed(1)}m</span>
                   </div>
                   <div className="flex justify-between items-center text-[9px] font-mono text-text-faded pt-1 border-t border-border-faded">
-                    <span>Ángulo Rasante Base</span>
-                    <span>{ogucParams?.angle}º</span>
+                    <span>Rasantes (Sur / O-P)</span>
+                    <span className="text-text-main font-semibold">
+                      {ogucModel.regionInfo.surAngle}° / {ogucModel.regionInfo.opAngle}° (Arr. {activeOgucParams.rasanteStartHeight}m)
+                    </span>
                   </div>
-                  {ogucParams?.showShadows && projectVolume && (
-                    <div className="flex justify-between items-center text-[9px] font-mono text-text-faded">
-                      <span>Área Sombra Aprox.</span>
-                      <span>{Math.round(polygonArea(getOgucShadowPolygon(projectVolume.pts, projectVolume.height, ogucParams.angle, 135) || []))} m²</span>
+                  <div className="flex justify-between items-center text-[9px] font-mono text-text-faded">
+                    <span>Distanciamiento</span>
+                    <span className="text-text-main">
+                      {activeOgucParams.minSetback}m
+                      {ogucModel.extraSetbackMeters > 0
+                        ? ` → ${ogucModel.totalUpperSetbackMeters.toFixed(1)}m (>10.5m)`
+                        : ''}
+                    </span>
+                  </div>
+
+                  {activeOgucParams.showShadows && !ogucModel.collapsed && (
+                    <div className="mt-2 pt-2 border-t border-border-main space-y-1.5">
+                      <div className="text-[8px] font-bold uppercase tracking-wider text-text-faded">
+                        Comparativa de Sombras (Módulo 3)
+                      </div>
+                      <div className="flex justify-between items-center text-[9px] font-mono">
+                        <span className="flex items-center gap-1.5 text-[#38bdf8]">
+                          <div className="w-2.5 h-2.5 bg-[#06b6d4]/30 border border-[#38bdf8] border-dashed"></div>
+                          Sombra Permitida
+                        </span>
+                        <span className="font-bold text-[#38bdf8]">
+                          {Math.round(ogucModel.shadows.allowedAreaM2)} m²
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center text-[9px] font-mono">
+                        <span className="flex items-center gap-1.5 text-[#f43f5e]">
+                          <div className="w-2.5 h-2.5 bg-[#f43f5e]/40 border border-[#ef4444]"></div>
+                          Sombra Propuesta
+                        </span>
+                        <span className="font-bold text-[#f43f5e]">
+                          {Math.round(ogucModel.shadows.proposedAreaM2)} m²
+                        </span>
+                      </div>
+                      <div
+                        className={`mt-1 px-2 py-1 rounded-xs text-[8px] font-mono font-bold uppercase tracking-wider flex items-center justify-between ${
+                          ogucModel.shadows.complies
+                            ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                            : 'bg-rose-500/15 text-rose-400 border border-rose-500/30'
+                        }`}
+                      >
+                        <span>
+                          {ogucModel.shadows.complies
+                            ? '✓ Cumple Sombra OGUC'
+                            : '⚠ Excede Sombra Teórica'}
+                        </span>
+                        <span>{ogucModel.shadows.complianceRatio.toFixed(0)}%</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {ogucModel.collapsed && (
+                    <div className="mt-2 p-1.5 rounded-xs bg-rose-500/15 border border-rose-500/30 text-[8px] text-rose-400 font-mono">
+                      Aviso: El distanciamiento ({activeOgucParams.minSetback}m) supera el ancho del lote. Reduce el distanciamiento o dibuja un lote mayor.
                     </div>
                   )}
                 </div>
-                <p className="text-[8px] text-text-subtle uppercase tracking-widest mt-3 leading-relaxed">
-                  Para simplificación docente se considera comparación global de áreas de sombra (Teórica / Propuesta).
-                </p>
               </>
             )}
 

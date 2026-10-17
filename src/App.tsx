@@ -293,9 +293,14 @@ export default function App() {
       },
       oguc: {
         ogucAngle,
+        ogucRegionGroup,
+        ogucRasanteStartHeight,
+        ogucApplyExtraSetback,
+        ogucContinuousBaseHeight,
         ogucMaxHeight,
         ogucMinSetback,
-        showOgucShadows
+        showOgucShadows,
+        customLotPts
       },
       solar: {
         solarDate,
@@ -351,9 +356,14 @@ export default function App() {
           
           if (state.oguc) {
             if (state.oguc.ogucAngle !== undefined) setOgucAngle(state.oguc.ogucAngle);
+            if (state.oguc.ogucRegionGroup !== undefined) setOgucRegionGroup(state.oguc.ogucRegionGroup);
+            if (state.oguc.ogucRasanteStartHeight !== undefined) setOgucRasanteStartHeight(state.oguc.ogucRasanteStartHeight);
+            if (state.oguc.ogucApplyExtraSetback !== undefined) setOgucApplyExtraSetback(state.oguc.ogucApplyExtraSetback);
+            if (state.oguc.ogucContinuousBaseHeight !== undefined) setOgucContinuousBaseHeight(state.oguc.ogucContinuousBaseHeight);
             if (state.oguc.ogucMaxHeight !== undefined) setOgucMaxHeight(state.oguc.ogucMaxHeight);
             if (state.oguc.ogucMinSetback !== undefined) setOgucMinSetback(state.oguc.ogucMinSetback);
             if (state.oguc.showOgucShadows !== undefined) setShowOgucShadows(state.oguc.showOgucShadows);
+            if (state.oguc.customLotPts !== undefined) setCustomLotPts(state.oguc.customLotPts);
           }
           
           if (state.solar) {
@@ -653,17 +663,27 @@ export default function App() {
 
                   <div className="mb-6 flex gap-2">
                     <button 
-                      onClick={() => setIsDrawingLot(!isDrawingLot)} 
-                      className={`flex-1 flex items-center justify-center gap-2 text-[9px] uppercase tracking-widest border px-2 py-2 rounded-sm transition-colors ${isDrawingLot ? 'bg-accent/20 border-accent text-accent' : 'bg-bg-elevated border-border-main text-text-faded hover:text-text-main'}`}
+                      onClick={() => {
+                        if (!isDrawingLot) {
+                          setCustomLotPts([]);
+                          setIsDrawingLot(true);
+                        } else {
+                          if (!customLotPts || customLotPts.length < 3) {
+                            setCustomLotPts(null);
+                          }
+                          setIsDrawingLot(false);
+                        }
+                      }} 
+                      className={`flex-1 flex items-center justify-center gap-2 text-[9px] uppercase tracking-widest border px-2 py-2 rounded-sm transition-colors cursor-pointer ${isDrawingLot ? 'bg-accent/20 border-accent text-accent font-bold' : 'bg-bg-elevated border-border-main text-text-faded hover:text-text-main'}`}
                     >
                       <MapPin size={12} />
-                      {isDrawingLot ? 'Terminar' : 'Dibujar Lote'}
+                      {isDrawingLot ? `Terminar (${customLotPts?.length || 0} pts)` : 'Dibujar Lote'}
                     </button>
                     {customLotPts && customLotPts.length > 0 && (
                       <button 
                         onClick={() => {setCustomLotPts(null); setIsDrawingLot(false);}} 
-                        className="text-[9px] uppercase tracking-widest border border-border-main px-2 py-2 rounded-sm text-text-faded hover:text-accent transition-colors"
-                        title="Limpiar lote"
+                        className="text-[9px] uppercase tracking-widest border border-border-main px-2 py-2 rounded-sm text-text-faded hover:text-accent transition-colors cursor-pointer"
+                        title="Restaurar lote por defecto"
                       >
                         Limpiar
                       </button>
@@ -952,6 +972,17 @@ export default function App() {
                       interval={interval}
                       locationLat={locationLat}
                       locationLon={locationLon}
+                      analysisMode={analysisMode}
+                      ogucParams={{
+                        regionGroup: ogucRegionGroup,
+                        rasanteStartHeight: ogucRasanteStartHeight,
+                        minSetback: ogucMinSetback,
+                        applyExtraSetback: ogucApplyExtraSetback,
+                        maxHeight: ogucMaxHeight,
+                        continuousBaseHeight: ogucContinuousBaseHeight,
+                        showShadows: showOgucShadows,
+                        angle: ogucRegionGroup === 1 ? 63 : ogucRegionGroup === 2 ? 57 : 51
+                      }}
                       solarParams={{
                         date: new Date(solarDate),
                         time: solarTime,
@@ -963,6 +994,10 @@ export default function App() {
                         highways: showHighways,
                         waterways: showWaterways
                       }}
+                      isDrawingLot={isDrawingLot}
+                      setIsDrawingLot={setIsDrawingLot}
+                      customLotPts={customLotPts}
+                      setCustomLotPts={setCustomLotPts}
                     />
                   ) : (
                     <ContourViewer 

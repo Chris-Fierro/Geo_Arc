@@ -52,39 +52,26 @@ npm run dev
 
 ---
 
-## 3. Tareas de Desarrollo Pendientes (Roadmap Técnico)
+## 3. Tareas de Desarrollo Completadas en v1.3 (Prioridades 1 a 4)
 
-### Prioridad 1 — Corrección del "Modo Dibujo Libre" de Lote en el Visor SVG 2.5D
+### Prioridad 1 — Corrección del "Modo Dibujo Libre" de Lote en el Visor SVG 2.5D ✅
 - **Archivo involucrado:** [`src/components/ContourViewer.tsx`](../src/components/ContourViewer.tsx)
-- **Síntoma actual:** Al usar el botón *"Dibujar Lote"* directamente dentro del visor topográfico SVG (especialmente con zoom/pan activo o en vista isométrica), los vértices dibujados aparecen desplazados respecto a la punta del cursor.
-- **Solución técnica identificada:**
-  - En `ContourViewer.tsx`, el evento de arrastrar el volumen (`handleVolumePointerDown` $\rightarrow$ `handleMove`) ya resuelve correctamente la transformación inversa de coordenadas de pantalla (`clientX`, `clientY`) a coordenadas de la grilla (`gridX`, `gridY`) considerando el `d3.zoomTransform` y la proyección isométrica.
-  - Se debe extraer esa función de conversión inversa pantalla $\rightarrow$ grilla y aplicarla en los eventos `onPointerDown` y `onPointerMove` del modo de dibujo de lote.
+- [x] Implementada función `screenToGrid(clientX, clientY)` que invierte `getScreenCTM()`, `d3.zoomTransform` y la matriz ortográfica/isométrica con refinamiento iterativo de elevación $Z$.
+- [x] Habilitado el trazado preciso de lotes tanto en vista **Planta (2D)** como en **Perspectiva Isométrica (2.5D)** y previsualización en vivo desde el primer vértice.
 
-### Prioridad 2 — Módulo 2 OGUC: Rasantes Reales, Fachadas y Art. 2.6.12
-- **Archivos involucrados:** [`src/components/ContourViewer.tsx`](../src/components/ContourViewer.tsx) y [`src/components/ThreeTerrainViewer.tsx`](../src/components/ThreeTerrainViewer.tsx)
-- **Contexto:** Los controles de la UI en [`src/App.tsx`](../src/App.tsx) ya entregan el objeto completo `ogucParams`:
-  - `regionGroup`: `1 | 2 | 3` (Norte, Centro, Sur — preseleccionado automáticamente según latitud).
-  - `rasanteStartHeight`: Altura de arranque de la rasante desde el nivel de suelo (default `2.5m`).
-  - `minSetback`: Distanciamiento mínimo a deslindes.
-  - `applyExtraSetback`: Toggle de distanciamiento adicional sobre $10.5\text{ m}$ de altura (Art. 2.6.12 OGUC).
-  - `maxHeight`: Altura máxima permitida.
-  - `continuousBaseHeight`: Altura de edificación continua en línea oficial.
-- **Tareas a implementar:**
-  - [ ] Renderizar caras laterales sólidas/semitransparentes del volumen teórico con sombreado diferenciado por orientación (ej. cara Sur más oscura).
-  - [ ] Proyectar planos de rasante inclinados desde cada deslinde partiendo desde `rasanteStartHeight` y aplicando ángulos diferenciados según orientación (Sur vs. Oriente/Poniente/Norte) de acuerdo con la tabla del `regionGroup`.
-  - [ ] Aplicar el escalonamiento o retracción adicional cuando `applyExtraSetback` está activo y la altura supera los $10.5\text{ m}$.
+### Prioridad 2 — Módulo 2 OGUC: Rasantes Reales, Fachadas y Art. 2.6.12 ✅
+- **Archivos involucrados:** [`src/lib/ogucService.ts`](../src/lib/ogucService.ts), [`src/components/ContourViewer.tsx`](../src/components/ContourViewer.tsx) y [`src/components/ThreeTerrainViewer.tsx`](../src/components/ThreeTerrainViewer.tsx)
+- [x] Renderizado de caras laterales del volumen teórico ordenadas por profundidad y con sombreado diferenciado por orientación (Sur más oscura, Oriente/Poniente tono medio, Norte iluminada).
+- [x] Proyección de planos de rasante inclinados 3D desde cada deslinde partiendo desde `rasanteStartHeight` con ángulos diferenciados por orientación (`Sur` vs. `O/P` vs. `Norte`) según el `regionGroup` (`1 | 2 | 3`).
+- [x] Aplicado escalonamiento automático sobre $10.5\text{ m}$ de altura cuando `applyExtraSetback` está activo (Art. 2.6.12 OGUC) y soporte de placa continua (`continuousBaseHeight`).
 
-### Prioridad 3 — Módulo 3 OGUC: Sombras Comparativas y Reactivas
-- **Archivo involucrado:** [`src/components/ContourViewer.tsx`](../src/components/ContourViewer.tsx)
-- **Tareas a implementar:**
-  - [ ] Calcular y superponer visualmente dos polígonos de sombra:
-    1. **Sombra Teórica Normativa (Envolvente máxima permitida)** en tono azul/cian.
-    2. **Sombra del Volumen Propuesto** en tono rojo/magenta.
-  - [ ] Mostrar en la tarjeta de leyenda normativa el comparativo en $\text{m}^2$ (`Área Sombra Propuesta` vs. `Área Sombra Permitida`) y un indicador de cumplimiento normativo.
-  - [ ] Hacer que el perímetro de sombra se recalcule de forma reactiva en tiempo real mientras se arrastra el volumen o se modifican los parámetros OGUC.
+### Prioridad 3 — Módulo 3 OGUC: Sombras Comparativas y Reactivas ✅
+- **Archivos involucrados:** [`src/lib/ogucService.ts`](../src/lib/ogucService.ts) y [`src/components/ContourViewer.tsx`](../src/components/ContourViewer.tsx)
+- [x] Superposición visual de **Sombra Teórica Normativa (Envolvente máxima permitida)** en azul/cian (`#38bdf8`) y **Sombra del Volumen Propuesto** en rojo/magenta (`#f43f5e`).
+- [x] Comparativo en vivo en $\text{m}^2$ (`Sombra Permitida` vs. `Sombra Propuesta`) e indicador automático de cumplimiento normativo (`✓ Cumple Sombra OGUC` / `⚠ Excede Sombra Teórica`).
+- [x] Recálculo reactivo en tiempo real al arrastrar el volumen sobre la topografía o modificar parámetros OGUC.
 
-### Prioridad 4 — Sincronización de Herramientas Normativas y Solares en el Visor 3D WebGL
+### Prioridad 4 — Sincronización de Herramientas Normativas y Solares en el Visor 3D WebGL ✅
 - **Archivo involucrado:** [`src/components/ThreeTerrainViewer.tsx`](../src/components/ThreeTerrainViewer.tsx)
-- **Tareas opcionales para enriquecer el visor 3D realista:**
-  - [ ] Mostrar también el polígono del lote seleccionado, el volumen normativo propuesto y el arco del Heliodon solar dentro del visor 3D WebGL (`3D Satelital`), de modo que ambos visores (`3D Satelital` y `Topográfico SVG`) compartan todas las capas de análisis.
+- [x] Sincronizados el polígono de lote, el volumen OGUC multicapa (placa continua, cuerpo base y retranqueo $>10.5\text{ m}$), los planos de rasantes 3D, las sombras comparativas y la bóveda celeste del **Heliodon 3D** (3 arcos estacionales + sol activo), además de dibujo de lote 3D mediante Raycasting.
+

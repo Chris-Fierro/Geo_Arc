@@ -2,18 +2,22 @@ import React, { useEffect, useRef, useState, useMemo } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three-stdlib';
 import type { MeshData } from '../lib/meshProcessor';
+import type { AnalysisMode } from '../App';
 import { getSunPosition } from '../lib/SunPosition';
-import { 
-  Maximize2, 
-  RotateCcw, 
-  Sun, 
-  Layers, 
-  Eye, 
-  Compass, 
-  Box, 
-  Building2, 
-  Route, 
-  Crosshair 
+import {
+  OgucParams,
+  computeOgucModel,
+  computePolygonAreaM2,
+} from '../lib/ogucService';
+import {
+  Sun,
+  Layers,
+  Box,
+  Building2,
+  Route,
+  Crosshair,
+  Compass,
+  Ruler,
 } from 'lucide-react';
 
 interface ThreeTerrainViewerProps {
@@ -23,6 +27,8 @@ interface ThreeTerrainViewerProps {
   interval?: number;
   locationLat?: number;
   locationLon?: number;
+  analysisMode?: AnalysisMode;
+  ogucParams?: OgucParams;
   solarParams?: {
     date: Date;
     time: number;
@@ -34,17 +40,26 @@ interface ThreeTerrainViewerProps {
     highways?: boolean;
     waterways?: boolean;
   };
+  isDrawingLot?: boolean;
+  setIsDrawingLot?: (val: boolean) => void;
+  customLotPts?: { x: number; y: number; elev: number }[] | null;
+  setCustomLotPts?: (pts: { x: number; y: number; elev: number }[] | null) => void;
 }
 
 export default function ThreeTerrainViewer({
   meshData,
   satelliteTextureUrl,
   zExaggeration = 1.0,
-  interval = 1.0,
   locationLat = -33.4,
   locationLon = -70.5,
+  analysisMode = 'topographic',
+  ogucParams,
   solarParams,
   layerVisibility = { buildings: true, highways: true, waterways: true },
+  isDrawingLot = false,
+  setIsDrawingLot,
+  customLotPts,
+  setCustomLotPts,
 }: ThreeTerrainViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -52,7 +67,8 @@ export default function ThreeTerrainViewer({
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const dirLightRef = useRef<THREE.DirectionalLight | null>(null);
-  const sunRayRef = useRef<THREE.Line | null>(null);
+  const terrainMeshRef = useRef<THREE.Mesh | null>(null);
+  const cameraInitializedForMeshRef = useRef<MeshData | null>(null);
 
   // Viewer interactive toggles
   const [useTexture, setUseTexture] = useState<boolean>(true);
@@ -61,7 +77,44 @@ export default function ThreeTerrainViewer({
   const [showHighways3D, setShowHighways3D] = useState<boolean>(true);
   const [showWaterways3D, setShowWaterways3D] = useState<boolean>(true);
   const [showWireframe, setShowWireframe] = useState<boolean>(false);
+  const [showHeliodon3D, setShowHeliodon3D] = useState<boolean>(true);
   const [loadedTexture, setLoadedTexture] = useState<THREE.Texture | null>(null);
+
+  const cols = meshData.cols || meshData.size || 150;
+  const rows = meshData.rows || meshData.size || 150;
+  const widthM = meshData.w || 500;
+  const heightM = meshData.h || 500;
+  const minEv = meshData.minEv || 0;
+  const maxEv = meshData.maxEv || 10;
+
+  const getGridElevAt = (x: number, y: number) => {
+    const grid = meshData.grid;
+    const x0 = Math.max(0, Math.min(cols - 1, Math.floor(x)));
+    const y0 = Math.max(0, Math.min(rows - 1, Math.floor(y)));
+    const x1 = Math.min(x0 + 1, cols - 1);
+    const y1 = Math.min(y0 + 1, rows - 1);
+    const dx = Math.max(0, Math.min(1, x - x0));
+    const dy = Math.max(0, Math.min(1, y - y0));
+
+    const v00 = grid[y0 * cols + x0] ?? minEv;
+    const v10 = grid[y0 * cols + x1] ?? v00;
+    const v01 = grid[y1 * cols + x0] ?? v00;
+    const v11 = grid[y1 * cols + x1] ?? v01;
+
+    return (
+      v00 * (1 - dx) * (1 - dy) +
+      v10 * dx * (1 - dy) +
+      v01 * (1 - dx) * dy +
+      v11 * dx * dy
+    );
+  };
+
+  const gridToWorld = (gx: number, gy: number, elev: number, extraYOffset: number = 0) => {
+    const wx = (gx / Math.max(1, cols - 1) - 0.5) * widthM;
+    const wz = (gy / Math.max(1, rows - 1) - 0.5) * heightM;
+    const wy = (elev - minEv) * zExaggeration + extraYOffset;
+    return new THREE.Vector3(wx, wy, wz);
+  };
 
   // Load satellite texture when URL is available
   useEffect(() => {
@@ -93,6 +146,51 @@ export default function ThreeTerrainViewer({
     return getSunPosition(locationLat, locationLon, date, time);
   }, [locationLat, locationLon, solarParams?.date, solarParams?.time]);
 
+  // Compute OGUC normative model (shared with SVG viewer)
+  const activeOgucParams: OgucParams = useMemo(
+    () =>
+      ogucParams || {
+        regionGroup: 3,
+        rasanteStartHeight: 2.5,
+        minSetback: 3,
+        applyExtraSetback: false,
+        maxHeight: 14,
+        continuousBaseHeight: 0,
+        showShadows: true,
+        angle: 51,
+      },
+    [ogucParams]
+  );
+
+  const effectiveLotBasePts = useMemo(() => {
+    if (customLotPts && customLotPts.length >= 3) {
+      return customLotPts.map((p) => ({ x: p.x, y: p.y }));
+    }
+    if (isDrawingLot) return null;
+    const cx = (cols - 1) / 2;
+    const cy = (rows - 1) / 2;
+    const hw = cols * 0.11;
+    const hh = rows * 0.11;
+    return [
+      { x: cx - hw, y: cy - hh },
+      { x: cx + hw, y: cy - hh },
+      { x: cx + hw, y: cy + hh },
+      { x: cx - hw, y: cy + hh },
+    ];
+  }, [customLotPts, isDrawingLot, cols, rows]);
+
+  const ogucModel = useMemo(() => {
+    if (!effectiveLotBasePts) return null;
+    return computeOgucModel({
+      rawLotPts: effectiveLotBasePts,
+      ogucParams: activeOgucParams,
+      meshData,
+      n: cols,
+      m: rows,
+      getGridElevAt,
+    });
+  }, [effectiveLotBasePts, activeOgucParams, meshData, cols, rows]);
+
   // Main Scene Initialization and Render Loop
   useEffect(() => {
     const container = containerRef.current;
@@ -111,7 +209,11 @@ export default function ThreeTerrainViewer({
     cameraRef.current = camera;
 
     // 3. Renderer setup
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: true,
+      powerPreference: 'high-performance',
+    });
     rendererRef.current = renderer;
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -127,7 +229,7 @@ export default function ThreeTerrainViewer({
     controlsRef.current = controls;
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
-    controls.maxPolarAngle = Math.PI / 2 - 0.02; // Don't go below ground horizon
+    controls.maxPolarAngle = Math.PI / 2 - 0.02;
     controls.minDistance = 10;
     controls.maxDistance = 15000;
 
@@ -178,37 +280,36 @@ export default function ThreeTerrainViewer({
     };
   }, []);
 
-  // Update Scene Objects when meshData, textures, or settings change
+  // Enable/disable OrbitControls left-click rotate when drawing lot in 3D
+  useEffect(() => {
+    if (controlsRef.current) {
+      controlsRef.current.enableRotate = !isDrawingLot;
+    }
+  }, [isDrawingLot]);
+
+  // Update Base Scene Objects (Terrain, OSM Buildings, Roads, Waterways, Axes)
   useEffect(() => {
     const scene = sceneRef.current;
     const camera = cameraRef.current;
     const controls = controlsRef.current;
     if (!scene || !camera || !controls || !meshData) return;
 
-    // Remove old terrain, buildings, roads, waterways, helpers
     const oldObjects = scene.children.filter(
       (c) =>
         c.name.startsWith('Terrain_') ||
         c.name.startsWith('Building_') ||
         c.name.startsWith('Roads_') ||
         c.name.startsWith('Waterways_') ||
-        c.name.startsWith('Helper_')
+        c.name.startsWith('Helper_Axes')
     );
     for (const obj of oldObjects) {
       scene.remove(obj);
       if ((obj as THREE.Mesh).geometry) (obj as THREE.Mesh).geometry.dispose();
     }
 
-    const cols = meshData.cols || meshData.size || 150;
-    const rows = meshData.rows || meshData.size || 150;
-    const widthM = meshData.w || 500;
-    const heightM = meshData.h || 500;
-    const minEv = meshData.minEv || 0;
-    const maxEv = meshData.maxEv || 10;
-
     // 1. Terrain Geometry
     const geom = new THREE.PlaneGeometry(widthM, heightM, cols - 1, rows - 1);
-    geom.rotateX(-Math.PI / 2); // Horizontal XZ plane, +Y is UP
+    geom.rotateX(-Math.PI / 2);
 
     const posAttr = geom.attributes.position;
     for (let r = 0; r < rows; r++) {
@@ -221,7 +322,6 @@ export default function ThreeTerrainViewer({
     }
     geom.computeVertexNormals();
 
-    // Terrain Material (Satellite vs Shaded Technical)
     let terrainMat: THREE.Material;
     if (useTexture && loadedTexture) {
       terrainMat = new THREE.MeshStandardMaterial({
@@ -245,8 +345,8 @@ export default function ThreeTerrainViewer({
     terrainMesh.receiveShadow = true;
     terrainMesh.castShadow = true;
     scene.add(terrainMesh);
+    terrainMeshRef.current = terrainMesh;
 
-    // Bilinear Elevation Sampler for smooth vertex elevation matching the terrain surface
     const bbox = meshData.bbox || { minLon: 0, maxLon: 1, minLat: 0, maxLat: 1 };
     const { minLon, maxLon, minLat, maxLat } = bbox;
     const widthSpan = maxLon - minLon || 1;
@@ -255,33 +355,16 @@ export default function ThreeTerrainViewer({
     const getElevAtM = (lon: number, lat: number) => {
       const u = ((lon - minLon) / widthSpan) * (cols - 1);
       const v = ((maxLat - lat) / heightSpan) * (rows - 1);
-      const uClamped = Math.max(0, Math.min(cols - 1, u));
-      const vClamped = Math.max(0, Math.min(rows - 1, v));
-
-      const c0 = Math.floor(uClamped);
-      const c1 = Math.min(cols - 1, c0 + 1);
-      const r0 = Math.floor(vClamped);
-      const r1 = Math.min(rows - 1, r0 + 1);
-
-      const tx = uClamped - c0;
-      const ty = vClamped - r0;
-
-      const v00 = meshData.grid[r0 * cols + c0] ?? minEv;
-      const v10 = meshData.grid[r0 * cols + c1] ?? minEv;
-      const v01 = meshData.grid[r1 * cols + c0] ?? minEv;
-      const v11 = meshData.grid[r1 * cols + c1] ?? minEv;
-
-      const interpolated =
-        (1 - tx) * (1 - ty) * v00 +
-        tx * (1 - ty) * v10 +
-        (1 - tx) * ty * v01 +
-        tx * ty * v11;
-
-      return interpolated - minEv;
+      return getGridElevAt(u, v) - minEv;
     };
 
-    // 2. Extruded Context Buildings (White Architectural Massing with Edges)
-    if (showBuildings3D && layerVisibility.buildings && meshData.buildings?.elements && meshData.bbox) {
+    // 2. Extruded Context Buildings
+    if (
+      showBuildings3D &&
+      layerVisibility.buildings &&
+      meshData.buildings?.elements &&
+      meshData.bbox
+    ) {
       const buildingMat = new THREE.MeshStandardMaterial({
         color: 0xffffff,
         roughness: 0.25,
@@ -297,10 +380,14 @@ export default function ThreeTerrainViewer({
       buildingsGroup.name = 'Building_Group';
 
       for (const el of meshData.buildings.elements) {
-        let geometriesToProcess: { lat: number; lon: number }[][] = [];
+        const geometriesToProcess: { lat: number; lon: number }[][] = [];
         if (el.type === 'way' && el.tags?.building && el.geometry?.length >= 3) {
           geometriesToProcess.push(el.geometry);
-        } else if (el.type === 'relation' && el.tags?.building && Array.isArray(el.members)) {
+        } else if (
+          el.type === 'relation' &&
+          el.tags?.building &&
+          Array.isArray(el.members)
+        ) {
           for (const m of el.members) {
             if (m.role === 'outer' && m.geometry?.length >= 3) {
               geometriesToProcess.push(m.geometry);
@@ -317,12 +404,14 @@ export default function ThreeTerrainViewer({
 
         for (const geomCoords of geometriesToProcess) {
           try {
-            // Strip duplicate closing coordinate if present
-            let pts = [...geomCoords];
+            const pts = [...geomCoords];
             if (pts.length > 3) {
               const first = pts[0];
               const last = pts[pts.length - 1];
-              if (Math.abs(first.lat - last.lat) < 1e-7 && Math.abs(first.lon - last.lon) < 1e-7) {
+              if (
+                Math.abs(first.lat - last.lat) < 1e-7 &&
+                Math.abs(first.lon - last.lon) < 1e-7
+              ) {
                 pts.pop();
               }
             }
@@ -348,31 +437,28 @@ export default function ThreeTerrainViewer({
             avgX /= pts.length;
             avgZ /= pts.length;
 
-            // 2D shape in local coordinates centered at (avgX, avgZ)
-            // Three.js 2D shape: +X is East (wx - avgX), +Y is North (-(wz - avgZ))
             const shapePts = worldCoords.map(
               (c) => new THREE.Vector2(c.wx - avgX, -(c.wz - avgZ))
             );
 
-            // Ensure Counter-Clockwise (CCW) winding order for outward normals
             if (THREE.ShapeUtils.isClockWise(shapePts)) {
               shapePts.reverse();
             }
 
             const shape = new THREE.Shape(shapePts);
 
-            // Embed base 0.35m into lowest ground point to prevent hovering on slopes
             const baseEmbed = 0.35;
             const baseLevelM = Math.max(0, minFootprintElev - baseEmbed) * zExaggeration;
-            const slopeDelta = Math.max(0, maxFootprintElev - minFootprintElev) * zExaggeration;
-            const totalDepth = height * zExaggeration + slopeDelta + (baseEmbed * zExaggeration);
+            const slopeDelta =
+              Math.max(0, maxFootprintElev - minFootprintElev) * zExaggeration;
+            const totalDepth =
+              height * zExaggeration + slopeDelta + baseEmbed * zExaggeration;
 
             const extrudeGeom = new THREE.ExtrudeGeometry(shape, {
               depth: totalDepth,
               bevelEnabled: false,
             });
 
-            // Rotate -90 deg on X so +Z extrusion becomes +Y up, and -Y becomes +Z
             extrudeGeom.rotateX(-Math.PI / 2);
 
             const bMesh = new THREE.Mesh(extrudeGeom, buildingMat);
@@ -380,7 +466,6 @@ export default function ThreeTerrainViewer({
             bMesh.castShadow = true;
             bMesh.receiveShadow = true;
 
-            // Architectural outline edges
             const edges = new THREE.EdgesGeometry(extrudeGeom);
             const line = new THREE.LineSegments(edges, edgeMat);
             bMesh.add(line);
@@ -393,10 +478,15 @@ export default function ThreeTerrainViewer({
       scene.add(buildingsGroup);
     }
 
-    // 3. Highways / Road Network (Linework draped over 3D terrain)
-    if (showHighways3D && layerVisibility.highways && meshData.buildings?.elements && meshData.bbox) {
+    // 3. Highways / Road Network
+    if (
+      showHighways3D &&
+      layerVisibility.highways &&
+      meshData.buildings?.elements &&
+      meshData.bbox
+    ) {
       const roadMat = new THREE.LineBasicMaterial({
-        color: 0x475569, // Slate gray
+        color: 0x475569,
         linewidth: 1.5,
       });
 
@@ -404,7 +494,12 @@ export default function ThreeTerrainViewer({
       roadsGroup.name = 'Roads_Group';
 
       for (const el of meshData.buildings.elements) {
-        if (el.type === 'way' && el.tags?.highway && Array.isArray(el.geometry) && el.geometry.length >= 2) {
+        if (
+          el.type === 'way' &&
+          el.tags?.highway &&
+          Array.isArray(el.geometry) &&
+          el.geometry.length >= 2
+        ) {
           const pts: THREE.Vector3[] = [];
           for (const pt of el.geometry) {
             const wx = ((pt.lon - minLon) / widthSpan - 0.5) * widthM;
@@ -420,10 +515,15 @@ export default function ThreeTerrainViewer({
       if (roadsGroup.children.length > 0) scene.add(roadsGroup);
     }
 
-    // 4. Waterways (Rivers, streams, canals)
-    if (showWaterways3D && layerVisibility.waterways && meshData.buildings?.elements && meshData.bbox) {
+    // 4. Waterways
+    if (
+      showWaterways3D &&
+      layerVisibility.waterways &&
+      meshData.buildings?.elements &&
+      meshData.bbox
+    ) {
       const waterMat = new THREE.LineBasicMaterial({
-        color: 0x0284c7, // Vibrant blue
+        color: 0x0284c7,
         linewidth: 2,
       });
 
@@ -431,7 +531,12 @@ export default function ThreeTerrainViewer({
       waterGroup.name = 'Waterways_Group';
 
       for (const el of meshData.buildings.elements) {
-        if (el.type === 'way' && el.tags?.waterway && Array.isArray(el.geometry) && el.geometry.length >= 2) {
+        if (
+          el.type === 'way' &&
+          el.tags?.waterway &&
+          Array.isArray(el.geometry) &&
+          el.geometry.length >= 2
+        ) {
           const pts: THREE.Vector3[] = [];
           for (const pt of el.geometry) {
             const wx = ((pt.lon - minLon) / widthSpan - 0.5) * widthM;
@@ -447,16 +552,23 @@ export default function ThreeTerrainViewer({
       if (waterGroup.children.length > 0) scene.add(waterGroup);
     }
 
-    // 5. SketchUp-style Coordinate Axes (Red = X, Green = Z-up in SketchUp, Blue = Y)
+    // 5. SketchUp-style Coordinate Axes
     if (showAxes) {
       const axesGroup = new THREE.Group();
       axesGroup.name = 'Helper_Axes';
       const axisLen = Math.max(widthM, heightM) * 0.7;
 
-      // Solid Axes + Dotted negative extensions
-      const createAxis = (dir: THREE.Vector3, color: number, isDotted: boolean = false) => {
+      const createAxis = (
+        dir: THREE.Vector3,
+        color: number,
+        isDotted: boolean = false
+      ) => {
         const mat = isDotted
-          ? new THREE.LineDashedMaterial({ color, dashSize: axisLen * 0.02, gapSize: axisLen * 0.015 })
+          ? new THREE.LineDashedMaterial({
+              color,
+              dashSize: axisLen * 0.02,
+              gapSize: axisLen * 0.015,
+            })
           : new THREE.LineBasicMaterial({ color, linewidth: 2 });
         const geomA = new THREE.BufferGeometry().setFromPoints([
           new THREE.Vector3(0, 0, 0),
@@ -467,15 +579,10 @@ export default function ThreeTerrainViewer({
         return line;
       };
 
-      // X: Red (East)
       axesGroup.add(createAxis(new THREE.Vector3(1, 0, 0), 0xdc2626));
       axesGroup.add(createAxis(new THREE.Vector3(-1, 0, 0), 0xdc2626, true));
-
-      // Y (Up in ThreeJS, Blue in Sketchup Z-up): Blue
       axesGroup.add(createAxis(new THREE.Vector3(0, 1, 0), 0x2563eb));
       axesGroup.add(createAxis(new THREE.Vector3(0, -1, 0), 0x2563eb, true));
-
-      // Z (North in ThreeJS, Green in Sketchup): Green
       axesGroup.add(createAxis(new THREE.Vector3(0, 0, -1), 0x16a34a));
       axesGroup.add(createAxis(new THREE.Vector3(0, 0, 1), 0x16a34a, true));
 
@@ -483,12 +590,15 @@ export default function ThreeTerrainViewer({
       scene.add(axesGroup);
     }
 
-    // 6. Position Camera for a beautiful initial Isometric / Bird's Eye View
-    const maxDim = Math.max(widthM, heightM);
-    camera.position.set(maxDim * 0.85, maxDim * 0.75, maxDim * 0.85);
-    camera.lookAt(0, ((maxEv - minEv) / 2) * zExaggeration, 0);
-    controls.target.set(0, ((maxEv - minEv) / 2) * zExaggeration, 0);
-    controls.update();
+    // 6. Initialize camera only when meshData changes
+    if (cameraInitializedForMeshRef.current !== meshData) {
+      cameraInitializedForMeshRef.current = meshData;
+      const maxDim = Math.max(widthM, heightM);
+      camera.position.set(maxDim * 0.85, maxDim * 0.75, maxDim * 0.85);
+      camera.lookAt(0, ((maxEv - minEv) / 2) * zExaggeration, 0);
+      controls.target.set(0, ((maxEv - minEv) / 2) * zExaggeration, 0);
+      controls.update();
+    }
   }, [
     meshData,
     loadedTexture,
@@ -504,64 +614,420 @@ export default function ThreeTerrainViewer({
     layerVisibility.waterways,
   ]);
 
-  // Update Sunlight Position and Shadow Projection
+  // Synchronized Layer (Priority 4): Lot Polygon, OGUC Volume & Rasantes, Comparative Shadows, and 3D Heliodon
   useEffect(() => {
-    const dirLight = dirLightRef.current;
     const scene = sceneRef.current;
-    if (!dirLight || !scene || !meshData) return;
+    const dirLight = dirLightRef.current;
+    if (!scene || !meshData) return;
 
-    // Remove existing sun ray
-    const oldSunRay = scene.getObjectByName('Helper_SunRay');
-    if (oldSunRay) scene.remove(oldSunRay);
+    // Remove previous dynamic overlays
+    const oldOverlays = scene.children.filter(
+      (c) =>
+        c.name.startsWith('Overlay_Lot') ||
+        c.name.startsWith('Overlay_OGUC') ||
+        c.name.startsWith('Overlay_Heliodon') ||
+        c.name === 'Helper_SunRay'
+    );
+    for (const obj of oldOverlays) {
+      scene.remove(obj);
+    }
 
-    const maxDim = Math.max(meshData.w || 500, meshData.h || 500);
-    const radius = maxDim * 1.5;
-
-    // Sun altitude and azimuth to Cartesian coordinates
+    // 1. Update Sunlight Position & Shadow Camera
+    const maxDim = Math.max(widthM, heightM);
+    const sunRadius = maxDim * 1.3;
     const azRad = (sunPos.azimuth * Math.PI) / 180;
     const elRad = (Math.max(2, sunPos.elevation) * Math.PI) / 180;
 
-    const sunX = radius * Math.sin(azRad) * Math.cos(elRad);
-    const sunY = radius * Math.sin(elRad);
-    const sunZ = -radius * Math.cos(azRad) * Math.cos(elRad);
+    const sunX = sunRadius * Math.sin(azRad) * Math.cos(elRad);
+    const sunY = sunRadius * Math.sin(elRad);
+    const sunZ = -sunRadius * Math.cos(azRad) * Math.cos(elRad);
 
-    dirLight.position.set(sunX, sunY, sunZ);
-    dirLight.target.position.set(0, 0, 0);
+    if (dirLight) {
+      dirLight.position.set(sunX, sunY, sunZ);
+      dirLight.target.position.set(0, 0, 0);
+      dirLight.castShadow = solarParams?.showShadows !== false;
 
-    // Update shadow camera bounds to encapsulate terrain
-    const d = maxDim * 0.9;
-    dirLight.shadow.camera.left = -d;
-    dirLight.shadow.camera.right = d;
-    dirLight.shadow.camera.top = d;
-    dirLight.shadow.camera.bottom = -d;
-    dirLight.shadow.camera.updateProjectionMatrix();
-
-    // Orange Sun Vector Ray (as seen in the reference screenshot)
-    if (sunPos.elevation > 0) {
-      const rayLen = maxDim * 0.9;
-      const rayDir = new THREE.Vector3(sunX, sunY, sunZ).normalize();
-      const rayPts = [
-        new THREE.Vector3(0, ((meshData.maxEv - meshData.minEv) / 2) * zExaggeration, 0),
-        new THREE.Vector3(0, ((meshData.maxEv - meshData.minEv) / 2) * zExaggeration, 0).add(
-          rayDir.clone().multiplyScalar(rayLen)
-        ),
-      ];
-      const rayGeom = new THREE.BufferGeometry().setFromPoints(rayPts);
-      const rayMat = new THREE.LineBasicMaterial({ color: 0xf59e0b, linewidth: 3 });
-      const sunRay = new THREE.Line(rayGeom, rayMat);
-      sunRay.name = 'Helper_SunRay';
-      scene.add(sunRay);
-      sunRayRef.current = sunRay;
+      const d = maxDim * 0.9;
+      dirLight.shadow.camera.left = -d;
+      dirLight.shadow.camera.right = d;
+      dirLight.shadow.camera.top = d;
+      dirLight.shadow.camera.bottom = -d;
+      dirLight.shadow.camera.updateProjectionMatrix();
     }
-  }, [sunPos, meshData, zExaggeration]);
+
+    // 2. Render Lot Polygon (Active in all modes if customLotPts exists, or in OGUC/Solar mode)
+    const lotGroup = new THREE.Group();
+    lotGroup.name = 'Overlay_Lot';
+
+    const ptsToRender =
+      isDrawingLot && customLotPts && customLotPts.length > 0
+        ? customLotPts
+        : ogucModel?.lotPolygon &&
+          (analysisMode === 'oguc' ||
+            analysisMode === 'solar' ||
+            (customLotPts && customLotPts.length >= 3))
+        ? ogucModel.lotPolygon
+        : null;
+
+    if (ptsToRender && ptsToRender.length >= 1) {
+      const lotVecs = ptsToRender.map((p) => gridToWorld(p.x, p.y, p.elev, 0.35));
+      if (!isDrawingLot && lotVecs.length >= 3) {
+        lotVecs.push(lotVecs[0].clone());
+      }
+      if (lotVecs.length >= 2) {
+        const lotGeom = new THREE.BufferGeometry().setFromPoints(lotVecs);
+        const lotMat = new THREE.LineBasicMaterial({
+          color: 0xec4899,
+          linewidth: 3,
+        });
+        lotGroup.add(new THREE.Line(lotGeom, lotMat));
+      }
+
+      // Corner markers
+      const markerGeom = new THREE.SphereGeometry(Math.max(0.6, maxDim * 0.004), 12, 12);
+      const markerMat = new THREE.MeshBasicMaterial({ color: 0xec4899 });
+      ptsToRender.forEach((p) => {
+        const mMesh = new THREE.Mesh(markerGeom, markerMat);
+        mMesh.position.copy(gridToWorld(p.x, p.y, p.elev, 0.4));
+        lotGroup.add(mMesh);
+      });
+    }
+    if (lotGroup.children.length > 0) {
+      scene.add(lotGroup);
+    }
+
+    // 3. Render Proposed OGUC / Solar Volume Tiers, Rasante Planes & Comparative Shadows
+    if (
+      (analysisMode === 'oguc' || analysisMode === 'solar') &&
+      ogucModel &&
+      !ogucModel.collapsed
+    ) {
+      const ogucGroup = new THREE.Group();
+      ogucGroup.name = 'Overlay_OGUC';
+
+      // 3a. Volume Tiers (Placa Continua, Cuerpo Base <=10.5m, Cuerpo >10.5m Art. 2.6.12)
+      for (const tier of ogucModel.tiers) {
+        if (tier.basePts.length < 3) continue;
+        let avgX = 0;
+        let avgZ = 0;
+        let minGroundY = Infinity;
+
+        const worldPts = tier.basePts.map((p, i) => {
+          const wBase = gridToWorld(p.x, p.y, p.elev, 0);
+          const wRoof = gridToWorld(
+            tier.roofPts[i].x,
+            tier.roofPts[i].y,
+            tier.roofPts[i].elev,
+            0
+          );
+          avgX += wBase.x;
+          avgZ += wBase.z;
+          if (wBase.y < minGroundY) minGroundY = wBase.y;
+          return { bx: wBase.x, by: wBase.y, bz: wBase.z, ry: wRoof.y };
+        });
+
+        avgX /= worldPts.length;
+        avgZ /= worldPts.length;
+        const maxRoofY = Math.max(...worldPts.map((w) => w.ry));
+        const depthY = Math.max(0.5, maxRoofY - minGroundY);
+
+        const shapePts = worldPts.map(
+          (w) => new THREE.Vector2(w.bx - avgX, -(w.bz - avgZ))
+        );
+        if (THREE.ShapeUtils.isClockWise(shapePts)) {
+          shapePts.reverse();
+        }
+
+        const shape = new THREE.Shape(shapePts);
+        const extrudeGeom = new THREE.ExtrudeGeometry(shape, {
+          depth: depthY,
+          bevelEnabled: false,
+        });
+        extrudeGeom.rotateX(-Math.PI / 2);
+
+        const isUpper = tier.id === 'upper_stepped';
+        const isCont = tier.id === 'continuous';
+
+        const volMat = new THREE.MeshStandardMaterial({
+          color: isUpper ? 0xfbbf24 : isCont ? 0x64748b : 0xf59e0b,
+          roughness: 0.35,
+          metalness: 0.1,
+          transparent: true,
+          opacity: isCont ? 0.65 : 0.88,
+        });
+
+        const volMesh = new THREE.Mesh(extrudeGeom, volMat);
+        volMesh.position.set(avgX, minGroundY, avgZ);
+        volMesh.castShadow = true;
+        volMesh.receiveShadow = true;
+
+        const edges = new THREE.EdgesGeometry(extrudeGeom);
+        const edgeLine = new THREE.LineSegments(
+          edges,
+          new THREE.LineBasicMaterial({
+            color: isUpper ? 0xfef08a : 0x78350f,
+            linewidth: 2,
+          })
+        );
+        volMesh.add(edgeLine);
+        ogucGroup.add(volMesh);
+      }
+
+      // 3b. Inclined Rasante Planes & Comparative Shadows (when in OGUC mode)
+      if (analysisMode === 'oguc') {
+        for (const plane of ogucModel.rasantePlanes) {
+          const v1 = gridToWorld(plane.p1.x, plane.p1.y, plane.p1.elev, 0.2);
+          const v2 = gridToWorld(plane.p2.x, plane.p2.y, plane.p2.elev, 0.2);
+          const vt2 = gridToWorld(plane.top2.x, plane.top2.y, plane.top2.elev, 0.2);
+          const vt1 = gridToWorld(plane.top1.x, plane.top1.y, plane.top1.elev, 0.2);
+
+          const quadGeom = new THREE.BufferGeometry();
+          const vertices = new Float32Array([
+            v1.x, v1.y, v1.z,
+            v2.x, v2.y, v2.z,
+            vt2.x, vt2.y, vt2.z,
+            v1.x, v1.y, v1.z,
+            vt2.x, vt2.y, vt2.z,
+            vt1.x, vt1.y, vt1.z,
+          ]);
+          quadGeom.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+          quadGeom.computeVertexNormals();
+
+          const isSur = plane.orientation === 'Sur';
+          const colorHex = isSur ? 0xf97316 : 0x38bdf8;
+
+          const planeMat = new THREE.MeshBasicMaterial({
+            color: colorHex,
+            transparent: true,
+            opacity: 0.16,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+          });
+          ogucGroup.add(new THREE.Mesh(quadGeom, planeMat));
+
+          const borderGeom = new THREE.BufferGeometry().setFromPoints([
+            v1,
+            v2,
+            vt2,
+            vt1,
+            v1,
+          ]);
+          const borderLine = new THREE.Line(
+            borderGeom,
+            new THREE.LineDashedMaterial({
+              color: colorHex,
+              dashSize: 2,
+              gapSize: 1.5,
+            })
+          );
+          borderLine.computeLineDistances();
+          ogucGroup.add(borderLine);
+        }
+
+        // Comparative Shadow Outlines on 3D Terrain
+        if (activeOgucParams.showShadows) {
+          // Allowed Theoretical Shadow (Cyan)
+          ogucModel.shadows.theoreticalPolygons.forEach((poly) => {
+            if (poly.length < 3) return;
+            const pts = poly.map((p) => gridToWorld(p.x, p.y, p.elev, 0.25));
+            pts.push(pts[0].clone());
+            const lGeom = new THREE.BufferGeometry().setFromPoints(pts);
+            const line = new THREE.Line(
+              lGeom,
+              new THREE.LineDashedMaterial({
+                color: 0x38bdf8,
+                dashSize: 2.5,
+                gapSize: 1.5,
+              })
+            );
+            line.computeLineDistances();
+            ogucGroup.add(line);
+          });
+
+          // Proposed Volume Shadow (Rose/Red)
+          ogucModel.shadows.proposedPolygons.forEach((poly) => {
+            if (poly.length < 3) return;
+            const pts = poly.map((p) => gridToWorld(p.x, p.y, p.elev, 0.32));
+            pts.push(pts[0].clone());
+            const lGeom = new THREE.BufferGeometry().setFromPoints(pts);
+            const line = new THREE.Line(
+              lGeom,
+              new THREE.LineBasicMaterial({ color: 0xf43f5e, linewidth: 2 })
+            );
+            ogucGroup.add(line);
+          });
+        }
+      }
+
+      scene.add(ogucGroup);
+    }
+
+    // 4. 3D Heliodon (Bóveda Celeste: Arcos Solares + Horizonte + Sol Activo)
+    const shouldRenderHeliodon =
+      showHeliodon3D && (solarParams?.showSunPath !== false);
+
+    if (shouldRenderHeliodon) {
+      const heliodonGroup = new THREE.Group();
+      heliodonGroup.name = 'Overlay_Heliodon';
+
+      const domeRadius = maxDim * 0.62;
+      const baseCenterY = ((maxEv - minEv) * 0.25) * zExaggeration;
+
+      // Horizon Ring & Elevation Rings (0°, 30°, 60°)
+      [0, 30, 60].forEach((elevDeg) => {
+        const elR = (elevDeg * Math.PI) / 180;
+        const r = domeRadius * Math.cos(elR);
+        const y = baseCenterY + domeRadius * Math.sin(elR);
+        const ringPts: THREE.Vector3[] = [];
+        for (let a = 0; a <= 360; a += 5) {
+          const rad = (a * Math.PI) / 180;
+          ringPts.push(new THREE.Vector3(r * Math.sin(rad), y, -r * Math.cos(rad)));
+        }
+        const ringGeom = new THREE.BufferGeometry().setFromPoints(ringPts);
+        const ringMat = new THREE.LineDashedMaterial({
+          color: 0x94a3b8,
+          dashSize: maxDim * 0.015,
+          gapSize: maxDim * 0.012,
+          transparent: true,
+          opacity: elevDeg === 0 ? 0.55 : 0.25,
+        });
+        const ringLine = new THREE.Line(ringGeom, ringMat);
+        ringLine.computeLineDistances();
+        heliodonGroup.add(ringLine);
+      });
+
+      // Seasonal Solar Arcs (Summer Solstice, Equinox, Winter Solstice)
+      const seasonalDates = [
+        { date: new Date('2024-12-21T12:00:00'), color: 0xf87171 }, // Verano
+        { date: new Date('2024-03-21T12:00:00'), color: 0xfbbf24 }, // Equinoccio
+        { date: new Date('2024-06-21T12:00:00'), color: 0x60a5fa }, // Invierno
+      ];
+
+      seasonalDates.forEach((sd) => {
+        const arcPts: THREE.Vector3[] = [];
+        for (let h = 5; h <= 21; h += 0.25) {
+          const pos = getSunPosition(locationLat, locationLon, sd.date, h);
+          if (pos.elevation >= 0) {
+            const elR = (pos.elevation * Math.PI) / 180;
+            const azR = (pos.azimuth * Math.PI) / 180;
+            const sx = domeRadius * Math.sin(azR) * Math.cos(elR);
+            const sy = baseCenterY + domeRadius * Math.sin(elR);
+            const sz = -domeRadius * Math.cos(azR) * Math.cos(elR);
+            arcPts.push(new THREE.Vector3(sx, sy, sz));
+          }
+        }
+        if (arcPts.length >= 2) {
+          const arcGeom = new THREE.BufferGeometry().setFromPoints(arcPts);
+          const arcMat = new THREE.LineBasicMaterial({
+            color: sd.color,
+            linewidth: 2,
+            transparent: true,
+            opacity: 0.85,
+          });
+          heliodonGroup.add(new THREE.Line(arcGeom, arcMat));
+        }
+      });
+
+      // Active Sun Orb & Ray on the Heliodon Dome
+      if (sunPos.elevation > 0) {
+        const domeSunX = domeRadius * Math.sin(azRad) * Math.cos(elRad);
+        const domeSunY = baseCenterY + domeRadius * Math.sin(elRad);
+        const domeSunZ = -domeRadius * Math.cos(azRad) * Math.cos(elRad);
+
+        const sunSphereGeom = new THREE.SphereGeometry(maxDim * 0.018, 20, 20);
+        const sunSphereMat = new THREE.MeshBasicMaterial({ color: 0xfbbf24 });
+        const sunOrb = new THREE.Mesh(sunSphereGeom, sunSphereMat);
+        sunOrb.position.set(domeSunX, domeSunY, domeSunZ);
+        heliodonGroup.add(sunOrb);
+
+        const haloGeom = new THREE.SphereGeometry(maxDim * 0.032, 16, 16);
+        const haloMat = new THREE.MeshBasicMaterial({
+          color: 0xf59e0b,
+          transparent: true,
+          opacity: 0.3,
+        });
+        const sunHalo = new THREE.Mesh(haloGeom, haloMat);
+        sunHalo.position.set(domeSunX, domeSunY, domeSunZ);
+        heliodonGroup.add(sunHalo);
+
+        const rayPts = [
+          new THREE.Vector3(0, baseCenterY, 0),
+          new THREE.Vector3(domeSunX, domeSunY, domeSunZ),
+        ];
+        const rayGeom = new THREE.BufferGeometry().setFromPoints(rayPts);
+        const rayMat = new THREE.LineBasicMaterial({
+          color: 0xf59e0b,
+          linewidth: 2,
+        });
+        heliodonGroup.add(new THREE.Line(rayGeom, rayMat));
+      }
+
+      scene.add(heliodonGroup);
+    }
+  }, [
+    sunPos,
+    meshData,
+    zExaggeration,
+    analysisMode,
+    ogucModel,
+    activeOgucParams.showShadows,
+    customLotPts,
+    isDrawingLot,
+    showHeliodon3D,
+    solarParams?.showSunPath,
+    solarParams?.showShadows,
+    locationLat,
+    locationLon,
+  ]);
+
+  // Interactive 3D Lot Drawing on Terrain via Raycasting
+  const handleCanvasPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDrawingLot || e.button !== 0) return;
+    const container = containerRef.current;
+    const camera = cameraRef.current;
+    const terrainMesh = terrainMeshRef.current;
+    if (!container || !camera || !terrainMesh) return;
+
+    if (e.detail >= 2 && customLotPts && customLotPts.length >= 3) {
+      if (setIsDrawingLot) setIsDrawingLot(false);
+      return;
+    }
+
+    const rect = container.getBoundingClientRect();
+    const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+    const hits = raycaster.intersectObject(terrainMesh, false);
+    if (hits.length === 0) return;
+
+    const hitPt = hits[0].point;
+    const gx = Math.max(0, Math.min(cols - 1, (hitPt.x / widthM + 0.5) * (cols - 1)));
+    const gy = Math.max(0, Math.min(rows - 1, (hitPt.z / heightM + 0.5) * (rows - 1)));
+    const elev = getGridElevAt(gx, gy);
+
+    if (customLotPts && customLotPts.length >= 3) {
+      const first = customLotPts[0];
+      const distGrid = Math.hypot(gx - first.x, gy - first.y);
+      if (distGrid < cols * 0.03) {
+        if (setIsDrawingLot) setIsDrawingLot(false);
+        return;
+      }
+    }
+
+    const nextPts = customLotPts ? [...customLotPts] : [];
+    nextPts.push({ x: gx, y: gy, elev });
+    if (setCustomLotPts) setCustomLotPts(nextPts);
+  };
 
   const resetCamera = (type: 'iso' | 'top' | 'front') => {
     const camera = cameraRef.current;
     const controls = controlsRef.current;
     if (!camera || !controls || !meshData) return;
 
-    const maxDim = Math.max(meshData.w || 500, meshData.h || 500);
-    const centerY = ((meshData.maxEv - meshData.minEv) / 2) * zExaggeration;
+    const maxDim = Math.max(widthM, heightM);
+    const centerY = ((maxEv - minEv) / 2) * zExaggeration;
 
     if (type === 'iso') {
       camera.position.set(maxDim * 0.85, maxDim * 0.75, maxDim * 0.85);
@@ -578,7 +1044,13 @@ export default function ThreeTerrainViewer({
   return (
     <div className="relative w-full h-full min-h-0 flex flex-col bg-bg-elevated overflow-hidden select-none">
       {/* 3D WebGL Canvas */}
-      <div ref={containerRef} className="w-full h-full flex-1 cursor-grab active:cursor-grabbing" />
+      <div
+        ref={containerRef}
+        onPointerDown={handleCanvasPointerDown}
+        className={`w-full h-full flex-1 ${
+          isDrawingLot ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'
+        }`}
+      />
 
       {/* Floating Toolbar (Top-Right) */}
       <div className="absolute top-4 right-4 z-20 flex flex-col gap-2">
@@ -618,6 +1090,18 @@ export default function ThreeTerrainViewer({
             title="Mostrar / Ocultar Vialidad y Calles (OSM)"
           >
             <Route size={13} />
+          </button>
+
+          <button
+            onClick={() => setShowHeliodon3D(!showHeliodon3D)}
+            className={`px-2 py-1.5 rounded-sm text-[9px] uppercase tracking-wider font-bold flex items-center gap-1 transition-colors cursor-pointer ${
+              showHeliodon3D
+                ? 'bg-bg-surface text-accent border border-accent/30'
+                : 'text-text-subtle hover:text-text-main'
+            }`}
+            title="Mostrar / Ocultar Bóveda Solar Heliodon 3D"
+          >
+            <Compass size={13} />
           </button>
 
           <button
@@ -671,11 +1155,11 @@ export default function ThreeTerrainViewer({
         </div>
       </div>
 
-      {/* Floating Solar & Elevation HUD (Bottom-Left) */}
+      {/* Floating Solar, OGUC & Elevation HUD (Bottom-Left) */}
       <div className="absolute bottom-4 left-4 z-20 bg-bg-surface/90 backdrop-blur-md border border-border-main p-3 rounded-sm shadow-xl font-mono text-[10px] space-y-1.5 max-w-xs">
-        <div className="flex items-center justify-between border-b border-border-faded pb-1">
+        <div className="flex items-center justify-between border-b border-border-faded pb-1 gap-4">
           <span className="text-accent uppercase tracking-widest font-bold flex items-center gap-1.5">
-            <Sun size={12} /> Sol y Asombro
+            <Sun size={12} /> Sol y Relieve 3D
           </span>
           <span className="text-text-subtle">
             Alt: {sunPos.elevation.toFixed(1)}° | Az: {sunPos.azimuth.toFixed(0)}°
@@ -684,25 +1168,53 @@ export default function ThreeTerrainViewer({
         <div className="flex justify-between text-text-muted">
           <span>Relieve (Z):</span>
           <span className="text-text-main font-bold">
-            {meshData.minEv.toFixed(1)}m — {meshData.maxEv.toFixed(1)}m (Δ{(meshData.maxEv - meshData.minEv).toFixed(1)}m)
+            {minEv.toFixed(1)}m — {maxEv.toFixed(1)}m (Δ{(maxEv - minEv).toFixed(1)}m)
           </span>
         </div>
         <div className="flex justify-between text-text-muted">
           <span>Escala 3D:</span>
           <span>
-            {Math.round(meshData.w)}m × {Math.round(meshData.h)}m ({zExaggeration}x Z)
+            {Math.round(widthM)}m × {Math.round(heightM)}m ({zExaggeration}x Z)
           </span>
         </div>
+
+        {analysisMode === 'oguc' && ogucModel && !ogucModel.collapsed && (
+          <div className="pt-1.5 border-t border-border-faded space-y-1">
+            <div className="flex justify-between items-center text-[9px]">
+              <span className="text-[#ec4899] font-bold flex items-center gap-1">
+                <Ruler size={10} /> Lote / Vol. OGUC:
+              </span>
+              <span className="text-text-main font-bold">
+                {Math.round(ogucModel.lotAreaM2)} m² | h={ogucModel.effectiveHeight.toFixed(1)}m
+              </span>
+            </div>
+            <div className="flex justify-between items-center text-[9px]">
+              <span className="text-[#38bdf8]">Sombra Perm. / Prop.:</span>
+              <span className="font-bold">
+                <span className="text-[#38bdf8]">
+                  {Math.round(ogucModel.shadows.allowedAreaM2)}m²
+                </span>{' '}
+                /{' '}
+                <span className="text-[#f43f5e]">
+                  {Math.round(ogucModel.shadows.proposedAreaM2)}m²
+                </span>
+              </span>
+            </div>
+          </div>
+        )}
+
         {loadedTexture && (
           <div className="text-[9px] text-accent/80 pt-1 border-t border-border-faded">
-            ✓ Ortofoto Satelital proyectada en malla 3D
+            ✓ Ortofoto Satelital + Heliodon 3D sincronizados
           </div>
         )}
       </div>
 
       {/* Instruction Overlay Pill */}
       <div className="absolute bottom-4 right-4 z-20 text-[9px] font-mono text-text-subtle bg-bg-surface/80 backdrop-blur-xs px-2.5 py-1 rounded-sm border border-border-faded">
-        Girar: Click Izq. | Desplazar: Click Der. | Zoom: Rueda
+        {isDrawingLot
+          ? 'Modo Dibujo 3D: Click sobre terreno para trazar lote | Doble click para cerrar'
+          : 'Girar: Click Izq. | Desplazar: Click Der. | Zoom: Rueda'}
       </div>
     </div>
   );
