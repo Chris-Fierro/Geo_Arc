@@ -29,7 +29,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Al dibujar un lote irregular cóncavo (en forma de "L" o "U"), el algoritmo de distanciamiento interior (`insetPolygonBisector`) genera polígonos válidos sin aristas auto-intersectadas ni artefactos en la extrusión 3D ni en el cálculo de superficie.
   4. Al seleccionar cualquier fecha del año (incluyendo `YYYY-01-01` y periodos de horario de verano UTC-3 o invierno UTC-4 en Chile, o ubicaciones en otras longitudes), el Heliodón calcula la altitud y azimut solar en hora local exacta sin desfase de medianoche UTC.
 **Plans**: TBD
-**UI hint**: yes
+**UI hint**: no
 
 ### Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada
 **Goal**: Los usuarios pueden importar mallas locales y exportar modelos 2D/3D (`.DXF`, `.STL`, `.GLB`, `.OBJ/.MTL`, `.JGW`, `.SVG`) geométricamente consistentes entre sí y georreferenciados en el sistema de coordenadas (`CRS`) seleccionado.
