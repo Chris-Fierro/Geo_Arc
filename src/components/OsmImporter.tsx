@@ -13,6 +13,7 @@ import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import { decode } from 'fast-png';
 import { fetchSatelliteOrthophoto, SatelliteResult } from '../lib/satelliteService';
+import { fetchOsmLayersForBBox } from '../lib/ogucService';
 
 const customPinIcon = new L.Icon({
   iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
@@ -175,7 +176,7 @@ export type SelectionMode = 'regular' | 'irregular' | 'point';
 function MapController({ center }: { center: [number, number] }) {
   const map = useMap();
   useEffect(() => {
-    map.flyTo(center, 15);
+    map.flyTo(center, Math.max(map.getZoom() || 15, 15));
   }, [center, map]);
   return null;
 }
@@ -241,6 +242,8 @@ function MapDrawController({
   onIrregularDblClick,
   pointPosition,
 }: MapDrawControllerProps) {
+  const map = useMap();
+
   useMapEvents({
     click(e) {
       const pos: [number, number] = [e.latlng.lat, e.latlng.lng];
@@ -249,6 +252,25 @@ function MapDrawController({
       } else if (mode === 'regular') {
         onRectClick(pos);
       } else if (mode === 'irregular') {
+        // Close polygon ONLY if user clicks within 10 screen pixels of the first vertex (and has >= 3 vertices)
+        if (irregularPoints.length >= 3) {
+          const firstScreenPt = map.latLngToContainerPoint(irregularPoints[0]);
+          const clickScreenPt = map.latLngToContainerPoint(e.latlng);
+          if (firstScreenPt.distanceTo(clickScreenPt) <= 10) {
+            onIrregularDblClick();
+            return;
+          }
+        }
+        // Ignore accidental duplicate click on the exact same pixel (e.g. second click of a double-click)
+        if (irregularPoints.length >= 1) {
+          const lastScreenPt = map.latLngToContainerPoint(
+            irregularPoints[irregularPoints.length - 1]
+          );
+          const clickScreenPt = map.latLngToContainerPoint(e.latlng);
+          if (lastScreenPt.distanceTo(clickScreenPt) <= 4) {
+            return;
+          }
+        }
         onIrregularClick(pos);
       }
     },
@@ -260,8 +282,9 @@ function MapDrawController({
         onIrregularMove(pos);
       }
     },
-    dblclick() {
-      if (mode === 'irregular') {
+    dblclick(e) {
+      if (mode === 'irregular' && irregularPoints.length >= 3) {
+        L.DomEvent.stopPropagation(e);
         onIrregularDblClick();
       }
     }
@@ -364,6 +387,16 @@ function MapDrawController({
               key={i}
               center={pt}
               radius={i === 0 ? 6 : 4}
+              eventHandlers={
+                i === 0 && irregularPoints.length >= 3
+                  ? {
+                      click: (ev) => {
+                        L.DomEvent.stopPropagation(ev);
+                        onIrregularDblClick();
+                      },
+                    }
+                  : undefined
+              }
               pathOptions={{
                 color: '#DA291C',
                 fillColor: i === 0 ? '#DA291C' : '#FFFFFF',
@@ -484,24 +517,13 @@ export default function OsmImporter({ onDataFetched }: OsmImporterProps) {
     }
   };
 
-  // 2. Irregular Polygon click handler
+  // 2. Irregular Polygon click handler (pixel-distance closing is handled in MapDrawController)
   const handleIrregularClick = (pos: [number, number]) => {
-    if (irregularPoints.length >= 3) {
-      // Check if clicking near first point to close
-      const first = irregularPoints[0];
-      const dLat = Math.abs(pos[0] - first[0]);
-      const dLon = Math.abs(pos[1] - first[1]);
-      if (dLat < 0.0006 && dLon < 0.0006) {
-        finishIrregularPolygon();
-        return;
-      }
-    }
-
     if (irregularPoints.length === 0) {
       setPolygon(null);
       setMetrics(null);
     }
-    setIrregularPoints([...irregularPoints, pos]);
+    setIrregularPoints((prev) => [...prev, pos]);
   };
 
   const finishIrregularPolygon = () => {
@@ -511,7 +533,6 @@ export default function OsmImporter({ onDataFetched }: OsmImporterProps) {
     setMetrics(m);
     if (m) {
       setPosition(m.centroid);
-      setCenter(m.centroid);
     }
     setIrregularPoints([]);
     setMousePos(null);
@@ -572,25 +593,26 @@ export default function OsmImporter({ onDataFetched }: OsmImporterProps) {
         const polyMinLon = Math.min(...lons);
         const polyMaxLon = Math.max(...lons);
 
-        // Margen contextual del 18% para contexto topográfico
+        // Margen contextual proporcional (~45% del tamaño del lote, mínimo ~48m por lado para contexto OGUC de calle y vecinos)
         const latSpan = polyMaxLat - polyMinLat;
         const lonSpan = polyMaxLon - polyMinLon;
-        const marginLat = Math.max(latSpan * 0.18, 0.001);
-        const marginLon = Math.max(lonSpan * 0.18, 0.001);
+        const marginLat = Math.max(latSpan * 0.45, 0.00045);
+        const marginLon = Math.max(lonSpan * 0.45, 0.00045);
 
         minLat = polyMinLat - marginLat;
         maxLat = polyMaxLat + marginLat;
         minLon = polyMinLon - marginLon;
         maxLon = polyMaxLon + marginLon;
       } else {
-        const delta = 0.005; 
+        const delta = 0.0035; 
         minLat = position[0] - delta;
         maxLat = position[0] + delta;
         minLon = position[1] - delta;
         maxLon = position[1] + delta;
       }
       
-      const z = 14; 
+      // Use max Terrarium resolution (z=15) for lot/neighborhood scale, z=14 for larger areas
+      const z = Math.max(maxLat - minLat, maxLon - minLon) < 0.015 ? 15 : 14; 
       const lon2tile = (lon: number, zoom: number) => (Math.floor((lon + 180) / 360 * Math.pow(2, zoom)));
       const lat2tile = (lat: number, zoom: number) => (Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom)));
       const lon2tileFloat = (lon: number, zoom: number) => ((lon + 180) / 360 * Math.pow(2, zoom));
@@ -654,7 +676,8 @@ export default function OsmImporter({ onDataFetched }: OsmImporterProps) {
         const r = tile.data[idx];
         const g = tile.data[idx+1];
         const b = tile.data[idx+2];
-        return (r * 256 + g + b / 256) - 32768;
+        const rawElev = (r * 256 + g + b / 256) - 32768;
+        return rawElev < -20000 ? -32768 : Math.max(0, rawElev);
       };
 
       const getElevation = (lat: number, lon: number) => {
@@ -698,72 +721,7 @@ export default function OsmImporter({ onDataFetched }: OsmImporterProps) {
       let buildingsData = null;
       setExtractionStatus('Consultando capas OSM (edificios y vialidad)...');
       try {
-        const overpassQuery = `[out:json][timeout:30];
-(
-  way["building"](${minLat},${minLon},${maxLat},${maxLon});
-  relation["building"](${minLat},${minLon},${maxLat},${maxLon});
-  way["highway"](${minLat},${minLon},${maxLat},${maxLon});
-  way["waterway"](${minLat},${minLon},${maxLat},${maxLon});
-);
-out geom;`;
-
-        // 1. Intentar primero a través del proxy local de Vite (/api/overpass)
-        try {
-          const proxyResp = await fetch('/api/overpass', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: 'data=' + encodeURIComponent(overpassQuery),
-          });
-          if (proxyResp.ok) {
-            const data = await proxyResp.json();
-            if (data && Array.isArray(data.elements)) {
-              buildingsData = data;
-              console.log(`[GeoArc OSM] ${data.elements.length} elementos obtenidos vía proxy local /api/overpass`);
-            }
-          }
-        } catch (proxyErr) {
-          console.warn('[GeoArc OSM] Proxy local no disponible o falló:', proxyErr);
-        }
-
-        // 2. Si el proxy local no retornó datos, consultar mirrors públicos directos con CORS
-        if (!buildingsData) {
-          const directMirrors = [
-            'https://lz4.overpass-api.de/api/interpreter',
-            'https://overpass.kumi.systems/api/interpreter',
-            'https://overpass-api.de/api/interpreter',
-            'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
-          ];
-
-          for (const mirrorUrl of directMirrors) {
-            try {
-              const controller = new AbortController();
-              const timeoutId = setTimeout(() => controller.abort(), 20000);
-              const mirrorResp = await fetch(mirrorUrl, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                body: 'data=' + encodeURIComponent(overpassQuery),
-                signal: controller.signal,
-              });
-              clearTimeout(timeoutId);
-
-              if (mirrorResp.ok) {
-                const data = await mirrorResp.json();
-                if (data && Array.isArray(data.elements)) {
-                  buildingsData = data;
-                  console.log(`[GeoArc OSM] ${data.elements.length} elementos obtenidos vía mirror directo: ${mirrorUrl}`);
-                  break;
-                }
-              }
-            } catch (mirrorErr) {
-              console.warn(`[GeoArc OSM] Mirror ${mirrorUrl} no respondió:`, mirrorErr);
-            }
-          }
-        }
-
+        buildingsData = await fetchOsmLayersForBBox({ minLat, maxLat, minLon, maxLon });
         if (buildingsData && Array.isArray(buildingsData.elements)) {
           const bCount = buildingsData.elements.filter((e: any) => e.tags?.building).length;
           const hCount = buildingsData.elements.filter((e: any) => e.tags?.highway).length;
@@ -839,19 +797,22 @@ out geom;`;
 
       {/* Mini-map in Sidebar */}
       <div className="h-[165px] w-full rounded-sm overflow-hidden border border-border-strong relative z-0 group">
-        <MapContainer center={center} zoom={13} style={{ height: '100%', width: '100%' }}>
+        <MapContainer center={center} zoom={15} maxZoom={22} style={{ height: '100%', width: '100%' }}>
           <LayersControl position="topright">
             <LayersControl.BaseLayer checked name="Standard">
               <TileLayer
                 attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                maxNativeZoom={19}
+                maxZoom={22}
               />
             </LayersControl.BaseLayer>
             <LayersControl.BaseLayer name="Tracestrack Topo">
               <TileLayer
                 attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> contributors, &copy; <a href="https://opentopomap.org">OpenTopoMap</a>'
                 url="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png"
-                maxZoom={17}
+                maxNativeZoom={17}
+                maxZoom={22}
               />
             </LayersControl.BaseLayer>
           </LayersControl>
@@ -1096,19 +1057,38 @@ out geom;`;
 
                 {/* 3. Expanded Leaflet Map Canvas */}
                 <div className="flex-1 w-full relative min-h-0 cursor-crosshair">
-                  <MapContainer center={center} zoom={14} style={{ height: '100%', width: '100%' }}>
+                  <MapContainer
+                    center={center}
+                    zoom={17}
+                    maxZoom={22}
+                    zoomSnap={0.5}
+                    zoomDelta={0.5}
+                    doubleClickZoom={false}
+                    style={{ height: '100%', width: '100%' }}
+                  >
                     <LayersControl position="topright">
-                      <LayersControl.BaseLayer checked name="Estándar (OSM)">
+                      <LayersControl.BaseLayer checked name="Estándar Catastral (OSM)">
                         <TileLayer
                           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
                           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                          maxNativeZoom={19}
+                          maxZoom={22}
+                        />
+                      </LayersControl.BaseLayer>
+                      <LayersControl.BaseLayer name="Satelital HD (Esri)">
+                        <TileLayer
+                          attribution='Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics'
+                          url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                          maxNativeZoom={19}
+                          maxZoom={22}
                         />
                       </LayersControl.BaseLayer>
                       <LayersControl.BaseLayer name="Topográfico (OpenTopoMap)">
                         <TileLayer
                           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> contributors, &copy; <a href="https://opentopomap.org">OpenTopoMap</a>'
                           url="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png"
-                          maxZoom={17}
+                          maxNativeZoom={17}
+                          maxZoom={22}
                         />
                       </LayersControl.BaseLayer>
                     </LayersControl>

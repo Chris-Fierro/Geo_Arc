@@ -9,6 +9,7 @@ import {
   computeOgucModel,
   computePolygonAreaM2,
   convexHull3D,
+  clipWayToBBox,
 } from '../lib/ogucService';
 
 interface ContourViewerProps {
@@ -244,6 +245,18 @@ export default function ContourViewer({
         if (!isBuilding && !isHighway && !isWaterway) continue;
 
         if (isBuilding) {
+          let sumLon = 0;
+          let sumLat = 0;
+          for (let i = 0; i < el.geometry.length; i++) {
+            sumLon += el.geometry[i].lon;
+            sumLat += el.geometry[i].lat;
+          }
+          const avgLon = sumLon / el.geometry.length;
+          const avgLat = sumLat / el.geometry.length;
+          if (avgLon < minLon || avgLon > maxLon || avgLat < minLat || avgLat > maxLat) {
+            continue;
+          }
+
           const pts = [];
           for (let i = 0; i < el.geometry.length; i++) {
             const pt = el.geometry[i];
@@ -264,48 +277,35 @@ export default function ContourViewer({
 
           buildings.push({ pts, height });
         } else if (isHighway || isWaterway) {
-          const pts = [];
-          for (let i = 0; i < el.geometry.length - 1; i++) {
-            const p1 = el.geometry[i];
-            const p2 = el.geometry[i + 1];
+          const clippedLines = clipWayToBBox(el.geometry, meshData.bbox, 15);
+          for (const lineCoords of clippedLines) {
+            const pts = lineCoords.map((pt) => {
+              const x = ((pt.lon - minLon) / widthSpan) * (n - 1);
+              const y = ((maxLat - pt.lat) / heightSpan) * (m - 1);
+              const elev = getElevAt(pt.lon, pt.lat);
+              return { x, y, elev: elev + 0.08 };
+            });
 
-            const d2 = Math.pow((p2.lon - p1.lon) * 111320, 2) + Math.pow((p2.lat - p1.lat) * 111320, 2);
-            const d = Math.sqrt(d2);
-            const steps = Math.max(1, Math.ceil(d / 20));
+            if (pts.length >= 2) {
+              let width = 1.2;
+              if (isHighway) {
+                const hType = el.tags.highway;
+                if (hType === 'motorway' || hType === 'trunk') width = 3.5;
+                else if (hType === 'primary' || hType === 'secondary') width = 2.5;
+                else if (hType === 'pedestrian' || hType === 'footway' || hType === 'path') width = 0.6;
+                else width = 1.2;
 
-            for (let s = 0; s <= steps; s++) {
-              if (s === steps && i < el.geometry.length - 2) continue;
+                if (el.tags.width) width = parseFloat(el.tags.width) * 0.3 || width;
+                highways.push({ pts, type: hType, width });
+              } else {
+                const wType = el.tags.waterway;
+                if (wType === 'river') width = 4.0;
+                else if (wType === 'stream' || wType === 'canal') width = 1.5;
+                else width = 1.0;
 
-              const f = s / steps;
-              const lon = p1.lon + (p2.lon - p1.lon) * f;
-              const lat = p1.lat + (p2.lat - p1.lat) * f;
-              const clampedLon = Math.max(minLon, Math.min(maxLon, lon));
-              const clampedLat = Math.max(minLat, Math.min(maxLat, lat));
-              const x = ((clampedLon - minLon) / widthSpan) * (n - 1);
-              const y = ((maxLat - clampedLat) / heightSpan) * (m - 1);
-              const elev = getElevAt(clampedLon, clampedLat);
-              pts.push({ x, y, elev: elev + 0.08 });
-            }
-          }
-          if (pts.length > 0) {
-            let width = 1.2;
-            if (isHighway) {
-              const hType = el.tags.highway;
-              if (hType === 'motorway' || hType === 'trunk') width = 3.5;
-              else if (hType === 'primary' || hType === 'secondary') width = 2.5;
-              else if (hType === 'pedestrian' || hType === 'footway' || hType === 'path') width = 0.6;
-              else width = 1.2;
-
-              if (el.tags.width) width = parseFloat(el.tags.width) * 0.3 || width;
-              highways.push({ pts, type: hType, width });
-            } else {
-              const wType = el.tags.waterway;
-              if (wType === 'river') width = 4.0;
-              else if (wType === 'stream' || wType === 'canal') width = 1.5;
-              else width = 1.0;
-
-              if (el.tags.width) width = parseFloat(el.tags.width) * 0.3 || width;
-              waterways.push({ pts, type: wType, width });
+                if (el.tags.width) width = parseFloat(el.tags.width) * 0.3 || width;
+                waterways.push({ pts, type: wType, width });
+              }
             }
           }
         }
@@ -845,7 +845,7 @@ export default function ContourViewer({
     const g = d3.select(zoomGroupRef.current);
 
     zoomBehavior.current = d3.zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.3, 40])
+      .scaleExtent([0.3, 120])
       .filter((event) => {
         if (isDrawingLot) return false;
         
@@ -923,6 +923,27 @@ export default function ContourViewer({
     if (svgRef.current && zoomBehavior.current) {
       d3.select(svgRef.current).transition().duration(500).call(zoomBehavior.current.transform, d3.zoomIdentity);
     }
+  };
+
+  const handleFocusLot = () => {
+    if (!svgRef.current || !zoomBehavior.current) return;
+    const pts = lotPolygon || effectiveLotBasePts;
+    if (!pts || pts.length < 3) return;
+    const projected = pts.map((p: any) =>
+      projectPoint(p.x, p.y, p.elev ?? getGridElevAt(p.x, p.y))
+    );
+    const xs = projected.map((p) => p.X);
+    const ys = projected.map((p) => p.Y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const span = Math.max(8, maxX - minX, maxY - minY);
+    const k = Math.min(80, Math.max(1.5, 160 / span));
+    const transform = d3.zoomIdentity.scale(k).translate(-cx, -cy);
+    d3.select(svgRef.current).transition().duration(450).call(zoomBehavior.current.transform, transform);
   };
 
   const handleExportDXF = () => {
@@ -1197,6 +1218,10 @@ export default function ContourViewer({
         <div className="flex flex-col bg-bg-surface p-1 rounded-sm border border-border-main shadow-lg transition-colors duration-300">
           <button onClick={handleZoomIn} className="p-2 text-text-faded hover:text-accent transition-colors" title="Acercar">
             <ZoomIn size={14} />
+          </button>
+          <div className="w-full h-[1px] bg-border-main"></div>
+          <button onClick={handleFocusLot} className="p-2 text-accent hover:bg-accent/10 transition-colors font-mono text-[8px] font-bold uppercase" title="Enfocar Lote / Predio Activo">
+            LOTE
           </button>
           <div className="w-full h-[1px] bg-border-main"></div>
           <button onClick={handleResetZoom} className="p-2 text-text-faded hover:text-accent transition-colors" title="Restablecer Vista">

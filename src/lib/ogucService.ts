@@ -659,3 +659,275 @@ export function computeOgucModel(params: {
     },
   };
 }
+
+/**
+ * Recorta un segmento 2D (lon, lat) contra el bounding box [minLon, maxLon] x [minLat, maxLat]
+ * usando el algoritmo paramétrico de Liang-Barsky.
+ */
+export function clipSegmentToBBox(
+  p1: { lon: number; lat: number },
+  p2: { lon: number; lat: number },
+  minLon: number,
+  maxLon: number,
+  minLat: number,
+  maxLat: number
+): { c1: { lon: number; lat: number }; c2: { lon: number; lat: number }; t0: number; t1: number } | null {
+  const dx = p2.lon - p1.lon;
+  const dy = p2.lat - p1.lat;
+  let t0 = 0;
+  let t1 = 1;
+
+  const clipSide = (p: number, q: number): boolean => {
+    if (Math.abs(p) < 1e-12) {
+      return q >= 0;
+    }
+    const r = q / p;
+    if (p < 0) {
+      if (r > t1) return false;
+      if (r > t0) t0 = r;
+    } else {
+      if (r < t0) return false;
+      if (r < t1) t1 = r;
+    }
+    return true;
+  };
+
+  if (
+    !clipSide(-dx, p1.lon - minLon) ||
+    !clipSide(dx, maxLon - p1.lon) ||
+    !clipSide(-dy, p1.lat - minLat) ||
+    !clipSide(dy, maxLat - p1.lat)
+  ) {
+    return null;
+  }
+
+  return {
+    c1: { lon: p1.lon + t0 * dx, lat: p1.lat + t0 * dy },
+    c2: { lon: p1.lon + t1 * dx, lat: p1.lat + t1 * dy },
+    t0,
+    t1,
+  };
+}
+
+/**
+ * Recorta una polilínea OSM (vialidad o curso de agua) exactamente a los bordes del terreno
+ * y subdivide cada tramo para que se adapte suavemente a la topografía 3D sin salirse del bbox.
+ */
+export function clipWayToBBox(
+  geometry: { lon: number; lat: number }[],
+  bbox: { minLon: number; maxLon: number; minLat: number; maxLat: number },
+  maxStepMeters: number = 15
+): { lon: number; lat: number }[][] {
+  if (!Array.isArray(geometry) || geometry.length < 2) return [];
+  const { minLon, maxLon, minLat, maxLat } = bbox;
+  const polylines: { lon: number; lat: number }[][] = [];
+  let currentLine: { lon: number; lat: number }[] = [];
+
+  for (let i = 0; i < geometry.length - 1; i++) {
+    const p1 = geometry[i];
+    const p2 = geometry[i + 1];
+    const clipped = clipSegmentToBBox(p1, p2, minLon, maxLon, minLat, maxLat);
+
+    if (!clipped) {
+      if (currentLine.length >= 2) {
+        polylines.push(currentLine);
+      }
+      currentLine = [];
+      continue;
+    }
+
+    const { c1, c2, t0, t1 } = clipped;
+    if (t0 > 1e-6 || currentLine.length === 0) {
+      if (currentLine.length >= 2) {
+        polylines.push(currentLine);
+      }
+      currentLine = [c1];
+    }
+
+    const distM = Math.hypot((c2.lon - c1.lon) * 111320, (c2.lat - c1.lat) * 111320);
+    const steps = Math.max(1, Math.ceil(distM / maxStepMeters));
+    for (let s = 1; s <= steps; s++) {
+      const f = s / steps;
+      currentLine.push({
+        lon: c1.lon + (c2.lon - c1.lon) * f,
+        lat: c1.lat + (c2.lat - c1.lat) * f,
+      });
+    }
+
+    if (t1 < 1 - 1e-6) {
+      if (currentLine.length >= 2) {
+        polylines.push(currentLine);
+      }
+      currentLine = [];
+    }
+  }
+
+  if (currentLine.length >= 2) {
+    polylines.push(currentLine);
+  }
+
+  return polylines;
+}
+
+/**
+ * Normaliza la respuesta de OpenStreetMap API v0.6 (map.json con nodes/ways)
+ * o de Overpass API (out geom) al formato unificado con `geometry: [{lat, lon}]`.
+ */
+export function normalizeOsmElementsToGeom(data: any): { elements: any[] } | null {
+  if (!data || !Array.isArray(data.elements)) return null;
+
+  const nodeMap = new Map<number, { lat: number; lon: number }>();
+  for (const el of data.elements) {
+    if (el.type === 'node' && typeof el.lat === 'number' && typeof el.lon === 'number') {
+      nodeMap.set(el.id, { lat: el.lat, lon: el.lon });
+    }
+  }
+
+  const wayGeomMap = new Map<number, { lat: number; lon: number }[]>();
+  for (const el of data.elements) {
+    if (el.type === 'way') {
+      if (!Array.isArray(el.geometry) && Array.isArray(el.nodes)) {
+        el.geometry = el.nodes
+          .map((nid: number) => nodeMap.get(nid))
+          .filter(Boolean);
+      }
+      if (Array.isArray(el.geometry)) {
+        wayGeomMap.set(el.id, el.geometry);
+      }
+    }
+  }
+
+  const filteredElements: any[] = [];
+  for (const el of data.elements) {
+    if (el.type === 'way' && Array.isArray(el.geometry) && el.geometry.length >= 2) {
+      if (
+        el.tags?.building ||
+        el.tags?.['building:part'] ||
+        el.tags?.highway ||
+        el.tags?.waterway
+      ) {
+        if (!el.tags.building && el.tags['building:part']) {
+          el.tags.building = el.tags['building:part'];
+        }
+        filteredElements.push(el);
+      }
+    } else if (
+      el.type === 'relation' &&
+      (el.tags?.building || el.tags?.['building:part']) &&
+      Array.isArray(el.members)
+    ) {
+      if (!el.tags.building && el.tags['building:part']) {
+        el.tags.building = el.tags['building:part'];
+      }
+      for (const m of el.members) {
+        if (!Array.isArray(m.geometry) && m.type === 'way' && wayGeomMap.has(m.ref)) {
+          m.geometry = wayGeomMap.get(m.ref);
+        }
+      }
+      filteredElements.push(el);
+    }
+  }
+
+  return { elements: filteredElements };
+}
+
+/**
+ * Obtiene edificios, vías y cursos de agua de OpenStreetMap para un BBox dado.
+ * Prioriza la API oficial rápida de OSM v0.6 (map.json en ~2s) y el proxy local /api/overpass,
+ * con fallback a mirrors de Overpass API.
+ */
+export async function fetchOsmLayersForBBox(bbox: {
+  minLat: number;
+  maxLat: number;
+  minLon: number;
+  maxLon: number;
+}): Promise<{ elements: any[] } | null> {
+  const { minLat, maxLat, minLon, maxLon } = bbox;
+
+  // 1. Intentar API oficial de OpenStreetMap v0.6 map.json (~1.5 - 2.5 segundos, CDN Fastly con CORS)
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    const osmUrl = `https://api.openstreetmap.org/api/0.6/map.json?bbox=${minLon},${minLat},${maxLon},${maxLat}`;
+    const resp = await fetch(osmUrl, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (resp.ok) {
+      const rawJson = await resp.json();
+      const normalized = normalizeOsmElementsToGeom(rawJson);
+      if (normalized && normalized.elements.length > 0) {
+        console.log(
+          `[GeoArc OSM] ${normalized.elements.length} elementos obtenidos vía API oficial OSM v0.6 (map.json)`
+        );
+        return normalized;
+      }
+    }
+  } catch (osmErr) {
+    console.warn('[GeoArc OSM] API oficial v0.6 no disponible o excedida, intentando Overpass:', osmErr);
+  }
+
+  const overpassQuery = `[out:json][timeout:25];
+(
+  way["building"](${minLat},${minLon},${maxLat},${maxLon});
+  relation["building"](${minLat},${minLon},${maxLat},${maxLon});
+  way["highway"](${minLat},${minLon},${maxLat},${maxLon});
+  way["waterway"](${minLat},${minLon},${maxLat},${maxLon});
+);
+out geom;`;
+
+  // 2. Intentar a través del proxy local de Vite (/api/overpass)
+  try {
+    const proxyResp = await fetch('/api/overpass', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'data=' + encodeURIComponent(overpassQuery),
+    });
+    if (proxyResp.ok) {
+      const data = await proxyResp.json();
+      const normalized = normalizeOsmElementsToGeom(data);
+      if (normalized) {
+        console.log(
+          `[GeoArc OSM] ${normalized.elements.length} elementos obtenidos vía proxy local /api/overpass`
+        );
+        return normalized;
+      }
+    }
+  } catch (proxyErr) {
+    console.warn('[GeoArc OSM] Proxy local /api/overpass falló:', proxyErr);
+  }
+
+  // 3. Fallback a mirrors directos de Overpass
+  const directMirrors = [
+    'https://overpass-api.de/api/interpreter',
+    'https://lz4.overpass-api.de/api/interpreter',
+    'https://z.overpass-api.de/api/interpreter',
+  ];
+
+  for (const mirrorUrl of directMirrors) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 25000);
+      const mirrorResp = await fetch(mirrorUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        body: 'data=' + encodeURIComponent(overpassQuery),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (mirrorResp.ok) {
+        const data = await mirrorResp.json();
+        const normalized = normalizeOsmElementsToGeom(data);
+        if (normalized) {
+          return normalized;
+        }
+      }
+    } catch (_) {}
+  }
+
+  return null;
+}
+
+

@@ -151,6 +151,18 @@ export function buildThreeSceneFromMeshData(
           }
           if (pts.length < 3) continue;
 
+          let sumLon = 0;
+          let sumLat = 0;
+          for (const pt of pts) {
+            sumLon += pt.lon;
+            sumLat += pt.lat;
+          }
+          const avgLon = sumLon / pts.length;
+          const avgLat = sumLat / pts.length;
+          if (avgLon < minLon || avgLon > maxLon || avgLat < minLat || avgLat > maxLat) {
+            continue;
+          }
+
           let avgX = 0;
           let avgZ = 0;
           let minFootprintElev = Infinity;
@@ -158,9 +170,11 @@ export function buildThreeSceneFromMeshData(
 
           const worldCoords: { wx: number; wz: number; elev: number }[] = [];
           for (const pt of pts) {
-            const wx = ((pt.lon - minLon) / widthSpan - 0.5) * widthM;
-            const wz = ((maxLat - pt.lat) / heightSpan - 0.5) * heightM;
-            const elev = getElevAtM(pt.lon, pt.lat);
+            const cLon = Math.max(minLon, Math.min(maxLon, pt.lon));
+            const cLat = Math.max(minLat, Math.min(maxLat, pt.lat));
+            const wx = ((cLon - minLon) / widthSpan - 0.5) * widthM;
+            const wz = ((maxLat - cLat) / heightSpan - 0.5) * heightM;
+            const elev = getElevAtM(cLon, cLat);
             avgX += wx;
             avgZ += wz;
             if (elev < minFootprintElev) minFootprintElev = elev;

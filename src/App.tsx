@@ -12,6 +12,7 @@ import { MeshData } from './lib/meshProcessor';
 import OsmImporter from './components/OsmImporter';
 import { getSunPosition } from './lib/SunPosition';
 import { exportToObjZip, exportToGlb, triggerBrowserDownload } from './lib/exportService';
+import { fetchOsmLayersForBBox } from './lib/ogucService';
 
 function InfoTooltip({ text }: { text: string }) {
   const [show, setShow] = useState(false);
@@ -114,6 +115,55 @@ export default function App() {
   const [meshData, setMeshData] = useState<MeshData | undefined>(undefined);
   const [osmDataRaw, setOsmDataRaw] = useState<any>(null);
 
+  // Auto-sanitize coastal bathymetry (< 0m submarine trench values) in active or imported meshData
+  useEffect(() => {
+    if (!meshData || !Array.isArray(meshData.grid) || meshData.minEv >= 0) return;
+    let newMin = Infinity;
+    let newMax = -Infinity;
+    const sanitizedGrid = meshData.grid.map((v: number) => {
+      const clamped = Number.isFinite(v) ? Math.max(0, v) : 0;
+      if (clamped < newMin) newMin = clamped;
+      if (clamped > newMax) newMax = clamped;
+      return clamped;
+    });
+    if (newMin === Infinity) { newMin = 0; newMax = 10; }
+    if (newMax <= newMin) newMax = newMin + 1;
+    setMeshData({ ...meshData, grid: sanitizedGrid, minEv: newMin, maxEv: newMax });
+    if (customLotPts && customLotPts.length > 0) {
+      const cols = meshData.cols || meshData.size || 150;
+      const rows = meshData.rows || meshData.size || 150;
+      setCustomLotPts(
+        customLotPts.map((pt) => {
+          const r = Math.min(rows - 1, Math.max(0, Math.floor(pt.y)));
+          const c = Math.min(cols - 1, Math.max(0, Math.floor(pt.x)));
+          return { ...pt, elev: sanitizedGrid[r * cols + c] ?? newMin };
+        })
+      );
+    }
+  }, [meshData]);
+
+  // Auto-recover missing OSM buildings/highways if an active terrain has bbox but buildings failed earlier
+  useEffect(() => {
+    if (
+      !meshData ||
+      !meshData.bbox ||
+      (meshData.buildings && Array.isArray(meshData.buildings.elements))
+    ) {
+      return;
+    }
+    let cancelled = false;
+    fetchOsmLayersForBBox(meshData.bbox).then((recovered) => {
+      if (!cancelled && recovered && Array.isArray(recovered.elements)) {
+        setMeshData((prev) =>
+          prev && prev.bbox === meshData.bbox ? { ...prev, buildings: recovered } : prev
+        );
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [meshData]);
+
   const handleSimulateProcess = async () => {
     setIsProcessing(true);
     setIsDone(false);
@@ -139,6 +189,7 @@ export default function App() {
       data.topoData.results.forEach((res: any) => {
         let elevation = res.elevation;
         if (elevation !== null && elevation !== undefined && elevation > -10000) {
+          elevation = Math.max(0, elevation);
           if (elevation < minEv) minEv = elevation;
           if (elevation > maxEv) maxEv = elevation;
         }
@@ -152,6 +203,7 @@ export default function App() {
       data.topoData.results.forEach((res: any, idx: number) => {
         let elevation = res.elevation;
         if (elevation == null || Number.isNaN(elevation) || elevation < -10000) elevation = fallbackEv;
+        else elevation = Math.max(0, elevation);
         elevArray[idx] = elevation;
       });
 

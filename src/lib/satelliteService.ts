@@ -49,13 +49,17 @@ export async function fetchSatelliteOrthophoto(bbox: BoundingBox): Promise<Satel
   const heightM = latSpan * 111320;
   const maxSpanM = Math.max(widthM, heightM);
 
-  // Dynamic zoom selection: Small lots get high-detail zoom 17, larger regions get zoom 16/15
+  // Dynamic zoom selection: Ultra-HD zoom 19/18 for urban lots, 17/16/15 for larger areas
   let zoom = 16;
-  if (maxSpanM <= 700) {
+  if (maxSpanM <= 320) {
+    zoom = 19; // ~0.29 m/pixel (Nivel Predial / Lote)
+  } else if (maxSpanM <= 700) {
+    zoom = 18; // ~0.59 m/pixel (Manzana Urbana)
+  } else if (maxSpanM <= 1500) {
     zoom = 17; // ~1.19 m/pixel
-  } else if (maxSpanM <= 2200) {
+  } else if (maxSpanM <= 3200) {
     zoom = 16; // ~2.38 m/pixel
-  } else if (maxSpanM <= 6000) {
+  } else if (maxSpanM <= 6500) {
     zoom = 15; // ~4.77 m/pixel
   } else {
     zoom = 14; // ~9.54 m/pixel

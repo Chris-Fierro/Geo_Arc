@@ -8,6 +8,7 @@ import {
   OgucParams,
   computeOgucModel,
   computePolygonAreaM2,
+  clipWayToBBox,
 } from '../lib/ogucService';
 import {
   Sun,
@@ -68,7 +69,7 @@ export default function ThreeTerrainViewer({
   const controlsRef = useRef<OrbitControls | null>(null);
   const dirLightRef = useRef<THREE.DirectionalLight | null>(null);
   const terrainMeshRef = useRef<THREE.Mesh | null>(null);
-  const cameraInitializedForMeshRef = useRef<MeshData | null>(null);
+  const cameraInitializedKeyRef = useRef<string | null>(null);
 
   // Viewer interactive toggles
   const [useTexture, setUseTexture] = useState<boolean>(true);
@@ -84,8 +85,8 @@ export default function ThreeTerrainViewer({
   const rows = meshData.rows || meshData.size || 150;
   const widthM = meshData.w || 500;
   const heightM = meshData.h || 500;
-  const minEv = meshData.minEv || 0;
-  const maxEv = meshData.maxEv || 10;
+  const minEv = Math.max(0, meshData.minEv || 0);
+  const maxEv = Math.max(minEv + 1, meshData.maxEv || 10);
 
   const getGridElevAt = (x: number, y: number) => {
     const grid = meshData.grid;
@@ -96,10 +97,10 @@ export default function ThreeTerrainViewer({
     const dx = Math.max(0, Math.min(1, x - x0));
     const dy = Math.max(0, Math.min(1, y - y0));
 
-    const v00 = grid[y0 * cols + x0] ?? minEv;
-    const v10 = grid[y0 * cols + x1] ?? v00;
-    const v01 = grid[y1 * cols + x0] ?? v00;
-    const v11 = grid[y1 * cols + x1] ?? v01;
+    const v00 = Math.max(minEv, grid[y0 * cols + x0] ?? minEv);
+    const v10 = Math.max(minEv, grid[y0 * cols + x1] ?? v00);
+    const v01 = Math.max(minEv, grid[y1 * cols + x0] ?? v00);
+    const v11 = Math.max(minEv, grid[y1 * cols + x1] ?? v01);
 
     return (
       v00 * (1 - dx) * (1 - dy) +
@@ -204,8 +205,17 @@ export default function ThreeTerrainViewer({
     sceneRef.current = scene;
     scene.background = new THREE.Color(0x1a1c1e);
 
-    // 2. Camera setup
-    const camera = new THREE.PerspectiveCamera(45, width / height, 1, 30000);
+    // 2. Camera setup (initialize immediately at 3D isometric position so it never starts at 0,0,0)
+    cameraInitializedKeyRef.current = null;
+    const initMaxDim = Math.max(widthM, heightM, 100);
+    const initCenterY = ((maxEv - minEv) * 0.4) * zExaggeration;
+    const camera = new THREE.PerspectiveCamera(45, width / height, 0.25, 30000);
+    camera.position.set(
+      initMaxDim * 0.8,
+      initMaxDim * 0.65 + initCenterY,
+      initMaxDim * 0.8
+    );
+    camera.lookAt(0, initCenterY, 0);
     cameraRef.current = camera;
 
     // 3. Renderer setup
@@ -230,8 +240,10 @@ export default function ThreeTerrainViewer({
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
     controls.maxPolarAngle = Math.PI / 2 - 0.02;
-    controls.minDistance = 10;
+    controls.minDistance = 1.5;
     controls.maxDistance = 15000;
+    controls.target.set(0, initCenterY, 0);
+    controls.update();
 
     // 5. Lighting
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.65);
@@ -315,7 +327,7 @@ export default function ThreeTerrainViewer({
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const vertIdx = r * cols + c;
-        const elev = meshData.grid[r * cols + c] ?? minEv;
+        const elev = Math.max(minEv, meshData.grid[r * cols + c] ?? minEv);
         const yVal = (elev - minEv) * zExaggeration;
         posAttr.setY(vertIdx, yVal);
       }
@@ -417,6 +429,24 @@ export default function ThreeTerrainViewer({
             }
             if (pts.length < 3) continue;
 
+            // Skip buildings whose centroid falls outside the terrain bounding box
+            let sumLon = 0;
+            let sumLat = 0;
+            for (const pt of pts) {
+              sumLon += pt.lon;
+              sumLat += pt.lat;
+            }
+            const avgLon = sumLon / pts.length;
+            const avgLat = sumLat / pts.length;
+            if (
+              avgLon < minLon ||
+              avgLon > maxLon ||
+              avgLat < minLat ||
+              avgLat > maxLat
+            ) {
+              continue;
+            }
+
             let avgX = 0;
             let avgZ = 0;
             let minFootprintElev = Infinity;
@@ -424,9 +454,11 @@ export default function ThreeTerrainViewer({
 
             const worldCoords: { wx: number; wz: number; elev: number }[] = [];
             for (const pt of pts) {
-              const wx = ((pt.lon - minLon) / widthSpan - 0.5) * widthM;
-              const wz = ((maxLat - pt.lat) / heightSpan - 0.5) * heightM;
-              const elev = getElevAtM(pt.lon, pt.lat);
+              const cLon = Math.max(minLon, Math.min(maxLon, pt.lon));
+              const cLat = Math.max(minLat, Math.min(maxLat, pt.lat));
+              const wx = ((cLon - minLon) / widthSpan - 0.5) * widthM;
+              const wz = ((maxLat - cLat) / heightSpan - 0.5) * heightM;
+              const elev = getElevAtM(cLon, cLat);
               avgX += wx;
               avgZ += wz;
               if (elev < minFootprintElev) minFootprintElev = elev;
@@ -478,7 +510,7 @@ export default function ThreeTerrainViewer({
       scene.add(buildingsGroup);
     }
 
-    // 3. Highways / Road Network
+    // 3. Highways / Road Network (clipped to terrain BBox & subdivided on terrain surface)
     if (
       showHighways3D &&
       layerVisibility.highways &&
@@ -500,22 +532,27 @@ export default function ThreeTerrainViewer({
           Array.isArray(el.geometry) &&
           el.geometry.length >= 2
         ) {
-          const pts: THREE.Vector3[] = [];
-          for (const pt of el.geometry) {
-            const wx = ((pt.lon - minLon) / widthSpan - 0.5) * widthM;
-            const wz = ((maxLat - pt.lat) / heightSpan - 0.5) * heightM;
-            const wy = getElevAtM(pt.lon, pt.lat) * zExaggeration + 0.15;
-            pts.push(new THREE.Vector3(wx, wy, wz));
+          const clippedLines = clipWayToBBox(el.geometry, meshData.bbox, 15);
+          for (const lineCoords of clippedLines) {
+            const pts: THREE.Vector3[] = [];
+            for (const pt of lineCoords) {
+              const wx = ((pt.lon - minLon) / widthSpan - 0.5) * widthM;
+              const wz = ((maxLat - pt.lat) / heightSpan - 0.5) * heightM;
+              const wy = getElevAtM(pt.lon, pt.lat) * zExaggeration + 0.18;
+              pts.push(new THREE.Vector3(wx, wy, wz));
+            }
+            if (pts.length >= 2) {
+              const geomR = new THREE.BufferGeometry().setFromPoints(pts);
+              roadsGroup.add(new THREE.Line(geomR, roadMat));
+            }
           }
-          const geomR = new THREE.BufferGeometry().setFromPoints(pts);
-          roadsGroup.add(new THREE.Line(geomR, roadMat));
         }
       }
 
       if (roadsGroup.children.length > 0) scene.add(roadsGroup);
     }
 
-    // 4. Waterways
+    // 4. Waterways (clipped to terrain BBox & subdivided on terrain surface)
     if (
       showWaterways3D &&
       layerVisibility.waterways &&
@@ -537,15 +574,20 @@ export default function ThreeTerrainViewer({
           Array.isArray(el.geometry) &&
           el.geometry.length >= 2
         ) {
-          const pts: THREE.Vector3[] = [];
-          for (const pt of el.geometry) {
-            const wx = ((pt.lon - minLon) / widthSpan - 0.5) * widthM;
-            const wz = ((maxLat - pt.lat) / heightSpan - 0.5) * heightM;
-            const wy = getElevAtM(pt.lon, pt.lat) * zExaggeration + 0.15;
-            pts.push(new THREE.Vector3(wx, wy, wz));
+          const clippedLines = clipWayToBBox(el.geometry, meshData.bbox, 15);
+          for (const lineCoords of clippedLines) {
+            const pts: THREE.Vector3[] = [];
+            for (const pt of lineCoords) {
+              const wx = ((pt.lon - minLon) / widthSpan - 0.5) * widthM;
+              const wz = ((maxLat - pt.lat) / heightSpan - 0.5) * heightM;
+              const wy = getElevAtM(pt.lon, pt.lat) * zExaggeration + 0.18;
+              pts.push(new THREE.Vector3(wx, wy, wz));
+            }
+            if (pts.length >= 2) {
+              const geomW = new THREE.BufferGeometry().setFromPoints(pts);
+              waterGroup.add(new THREE.Line(geomW, waterMat));
+            }
           }
-          const geomW = new THREE.BufferGeometry().setFromPoints(pts);
-          waterGroup.add(new THREE.Line(geomW, waterMat));
         }
       }
 
@@ -590,13 +632,21 @@ export default function ThreeTerrainViewer({
       scene.add(axesGroup);
     }
 
-    // 6. Initialize camera only when meshData changes
-    if (cameraInitializedForMeshRef.current !== meshData) {
-      cameraInitializedForMeshRef.current = meshData;
-      const maxDim = Math.max(widthM, heightM);
-      camera.position.set(maxDim * 0.85, maxDim * 0.75, maxDim * 0.85);
-      camera.lookAt(0, ((maxEv - minEv) / 2) * zExaggeration, 0);
-      controls.target.set(0, ((maxEv - minEv) / 2) * zExaggeration, 0);
+    // 6. Initialize camera when terrain dimensions or elevation range changes (or if camera was left in a degenerate state)
+    const meshKey = `${widthM.toFixed(0)}_${heightM.toFixed(0)}_${minEv.toFixed(1)}_${maxEv.toFixed(1)}`;
+    const horizDist = Math.hypot(
+      camera.position.x - controls.target.x,
+      camera.position.z - controls.target.z
+    );
+    if (cameraInitializedKeyRef.current !== meshKey || horizDist < 5) {
+      cameraInitializedKeyRef.current = meshKey;
+      const maxDim = Math.max(widthM, heightM, 100);
+      const centerSurfaceY =
+        (getGridElevAt((cols - 1) / 2, (rows - 1) / 2) - minEv) * zExaggeration;
+      const targetY = Math.max(centerSurfaceY, ((maxEv - minEv) * 0.35) * zExaggeration);
+      camera.position.set(maxDim * 0.8, maxDim * 0.65 + targetY, maxDim * 0.8);
+      controls.target.set(0, targetY, 0);
+      camera.lookAt(0, targetY, 0);
       controls.update();
     }
   }, [
@@ -670,10 +720,27 @@ export default function ThreeTerrainViewer({
         : null;
 
     if (ptsToRender && ptsToRender.length >= 1) {
-      const lotVecs = ptsToRender.map((p) => gridToWorld(p.x, p.y, p.elev, 0.35));
-      if (!isDrawingLot && lotVecs.length >= 3) {
-        lotVecs.push(lotVecs[0].clone());
+      const closedPts =
+        !isDrawingLot && ptsToRender.length >= 3
+          ? [...ptsToRender, ptsToRender[0]]
+          : ptsToRender;
+
+      const lotVecs: THREE.Vector3[] = [];
+      for (let i = 0; i < closedPts.length - 1; i++) {
+        const p1 = closedPts[i];
+        const p2 = closedPts[i + 1];
+        const segDist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+        const steps = Math.max(1, Math.ceil(segDist / 1.5));
+        for (let s = 0; s <= steps; s++) {
+          if (s === steps && i < closedPts.length - 2) continue;
+          const t = s / steps;
+          const gx = p1.x + (p2.x - p1.x) * t;
+          const gy = p1.y + (p2.y - p1.y) * t;
+          const gElev = getGridElevAt(gx, gy);
+          lotVecs.push(gridToWorld(gx, gy, gElev, 0.5));
+        }
       }
+
       if (lotVecs.length >= 2) {
         const lotGeom = new THREE.BufferGeometry().setFromPoints(lotVecs);
         const lotMat = new THREE.LineBasicMaterial({
@@ -871,7 +938,26 @@ export default function ThreeTerrainViewer({
       heliodonGroup.name = 'Overlay_Heliodon';
 
       const domeRadius = maxDim * 0.62;
-      const baseCenterY = ((maxEv - minEv) * 0.25) * zExaggeration;
+      const baseCenterY = 0;
+
+      // Target on the terrain surface (active lot centroid if drawn, else terrain center)
+      let rayTarget = new THREE.Vector3(
+        0,
+        (getGridElevAt((cols - 1) / 2, (rows - 1) / 2) - minEv) * zExaggeration,
+        0
+      );
+      if (ptsToRender && ptsToRender.length >= 3) {
+        let sumX = 0;
+        let sumY = 0;
+        for (const p of ptsToRender) {
+          sumX += p.x;
+          sumY += p.y;
+        }
+        const cx = sumX / ptsToRender.length;
+        const cy = sumY / ptsToRender.length;
+        const cElev = getGridElevAt(cx, cy);
+        rayTarget = gridToWorld(cx, cy, cElev, 0.5);
+      }
 
       // Horizon Ring & Elevation Rings (0°, 30°, 60°)
       [0, 30, 60].forEach((elevDeg) => {
@@ -895,6 +981,28 @@ export default function ThreeTerrainViewer({
         ringLine.computeLineDistances();
         heliodonGroup.add(ringLine);
       });
+
+      // North-South & East-West Base Compass Cross on the Horizon Plane
+      const nsLineGeom = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0, baseCenterY, -domeRadius * 1.04),
+        new THREE.Vector3(0, baseCenterY, domeRadius * 1.04),
+      ]);
+      const ewLineGeom = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(-domeRadius * 1.04, baseCenterY, 0),
+        new THREE.Vector3(domeRadius * 1.04, baseCenterY, 0),
+      ]);
+      const compassMat = new THREE.LineDashedMaterial({
+        color: 0x64748b,
+        dashSize: maxDim * 0.012,
+        gapSize: maxDim * 0.012,
+        transparent: true,
+        opacity: 0.35,
+      });
+      const nsLine = new THREE.Line(nsLineGeom, compassMat);
+      nsLine.computeLineDistances();
+      const ewLine = new THREE.Line(ewLineGeom, compassMat);
+      ewLine.computeLineDistances();
+      heliodonGroup.add(nsLine, ewLine);
 
       // Seasonal Solar Arcs (Summer Solstice, Equinox, Winter Solstice)
       const seasonalDates = [
@@ -951,7 +1059,7 @@ export default function ThreeTerrainViewer({
         heliodonGroup.add(sunHalo);
 
         const rayPts = [
-          new THREE.Vector3(0, baseCenterY, 0),
+          rayTarget,
           new THREE.Vector3(domeSunX, domeSunY, domeSunZ),
         ];
         const rayGeom = new THREE.BufferGeometry().setFromPoints(rayPts);
@@ -1009,8 +1117,11 @@ export default function ThreeTerrainViewer({
 
     if (customLotPts && customLotPts.length >= 3) {
       const first = customLotPts[0];
-      const distGrid = Math.hypot(gx - first.x, gy - first.y);
-      if (distGrid < cols * 0.03) {
+      const firstWorld = gridToWorld(first.x, first.y, first.elev, 0.4).project(camera);
+      const firstScreenX = ((firstWorld.x + 1) * 0.5) * rect.width + rect.left;
+      const firstScreenY = ((-firstWorld.y + 1) * 0.5) * rect.height + rect.top;
+      const distPx = Math.hypot(e.clientX - firstScreenX, e.clientY - firstScreenY);
+      if (distPx <= 10) {
         if (setIsDrawingLot) setIsDrawingLot(false);
         return;
       }
@@ -1021,13 +1132,49 @@ export default function ThreeTerrainViewer({
     if (setCustomLotPts) setCustomLotPts(nextPts);
   };
 
-  const resetCamera = (type: 'iso' | 'top' | 'front') => {
+  const resetCamera = (type: 'iso' | 'top' | 'front' | 'lot') => {
     const camera = cameraRef.current;
     const controls = controlsRef.current;
     if (!camera || !controls || !meshData) return;
 
     const maxDim = Math.max(widthM, heightM);
     const centerY = ((maxEv - minEv) / 2) * zExaggeration;
+
+    if (type === 'lot') {
+      const lotPts =
+        ogucModel?.lotPolygon ||
+        (customLotPts && customLotPts.length >= 3 ? customLotPts : null) ||
+        effectiveLotBasePts;
+      if (lotPts && lotPts.length >= 3) {
+        let minX = Infinity,
+          maxX = -Infinity,
+          minZ = Infinity,
+          maxZ = -Infinity,
+          sumX = 0,
+          sumZ = 0,
+          sumY = 0;
+        for (const p of lotPts) {
+          const elev = (p as any).elev ?? getGridElevAt(p.x, p.y);
+          const w = gridToWorld(p.x, p.y, elev, 0);
+          sumX += w.x;
+          sumZ += w.z;
+          sumY += w.y;
+          if (w.x < minX) minX = w.x;
+          if (w.x > maxX) maxX = w.x;
+          if (w.z < minZ) minZ = w.z;
+          if (w.z > maxZ) maxZ = w.z;
+        }
+        const cx = sumX / lotPts.length;
+        const cz = sumZ / lotPts.length;
+        const cy = sumY / lotPts.length;
+        const lotSpan = Math.max(25, Math.hypot(maxX - minX, maxZ - minZ));
+        camera.position.set(cx + lotSpan * 1.15, cy + lotSpan * 0.95, cz + lotSpan * 1.15);
+        controls.target.set(cx, cy, cz);
+        camera.lookAt(cx, cy, cz);
+        controls.update();
+        return;
+      }
+    }
 
     if (type === 'iso') {
       camera.position.set(maxDim * 0.85, maxDim * 0.75, maxDim * 0.85);
@@ -1131,6 +1278,13 @@ export default function ThreeTerrainViewer({
 
         {/* Camera Views Preset Pills */}
         <div className="flex bg-bg-surface/90 backdrop-blur-md border border-border-main p-1 rounded-sm shadow-xl gap-1 justify-end font-mono text-[9px]">
+          <button
+            onClick={() => resetCamera('lot')}
+            className="px-2 py-1 bg-accent/15 text-accent hover:bg-accent hover:text-white rounded-xs cursor-pointer uppercase tracking-wider font-bold transition-colors"
+            title="Enfocar cámara sobre el Lote / Predio activo"
+          >
+            Lote
+          </button>
           <button
             onClick={() => resetCamera('iso')}
             className="px-2 py-1 bg-bg-elevated text-text-faded hover:text-text-main rounded-xs cursor-pointer uppercase tracking-wider"
