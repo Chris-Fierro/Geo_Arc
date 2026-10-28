@@ -101,34 +101,296 @@ export function getRegionRasanteInfo(regionGroup: 1 | 2 | 3) {
   }
 }
 
+export function signedPolygonArea2D(pts: { x: number; y: number }[]): number {
+  if (!pts || pts.length < 3) return 0;
+  let area = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const j = (i + 1) % pts.length;
+    area += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
+  }
+  return area * 0.5;
+}
+
+export function cleanPolygonVertices(pts: { x: number; y: number }[]): { x: number; y: number }[] {
+  if (!pts || pts.length === 0) return [];
+  // 1a. Filtrar vértices consecutivos duplicados (< 1e-4), incluyendo cierre último-primero
+  const deduped: { x: number; y: number }[] = [];
+  for (const p of pts) {
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+    if (deduped.length === 0) {
+      deduped.push({ x: p.x, y: p.y });
+    } else {
+      const prev = deduped[deduped.length - 1];
+      if (Math.hypot(p.x - prev.x, p.y - prev.y) >= 1e-4) {
+        deduped.push({ x: p.x, y: p.y });
+      }
+    }
+  }
+  while (
+    deduped.length > 1 &&
+    Math.hypot(
+      deduped[deduped.length - 1].x - deduped[0].x,
+      deduped[deduped.length - 1].y - deduped[0].y
+    ) < 1e-4
+  ) {
+    deduped.pop();
+  }
+  if (deduped.length < 3) return deduped;
+
+  // 1b. Filtrar vértices colineales redundantes
+  let ring = deduped;
+  let changed = true;
+  while (changed && ring.length >= 3) {
+    changed = false;
+    const nextRing: { x: number; y: number }[] = [];
+    const len = ring.length;
+    for (let i = 0; i < len; i++) {
+      const prev = ring[(i - 1 + len) % len];
+      const curr = ring[i];
+      const next = ring[(i + 1) % len];
+      const d1x = curr.x - prev.x;
+      const d1y = curr.y - prev.y;
+      const d2x = next.x - curr.x;
+      const d2y = next.y - curr.y;
+      const l1 = Math.hypot(d1x, d1y);
+      const l2 = Math.hypot(d2x, d2y);
+      if (l1 < 1e-4 || l2 < 1e-4) {
+        changed = true;
+        continue;
+      }
+      const u1x = d1x / l1;
+      const u1y = d1y / l1;
+      const u2x = d2x / l2;
+      const u2y = d2y / l2;
+      const cross = Math.abs(u1x * u2y - u1y * u2x);
+      const dot = u1x * u2x + u1y * u2y;
+      if (cross < 1e-4 && dot > 0 && len - (changed ? 1 : 0) > 3) {
+        changed = true;
+        continue;
+      }
+      nextRing.push(curr);
+    }
+    ring = nextRing;
+  }
+  return ring;
+}
+
+export function intersectSegmentsStrict(
+  a1: { x: number; y: number },
+  a2: { x: number; y: number },
+  b1: { x: number; y: number },
+  b2: { x: number; y: number }
+): { x: number; y: number } | null {
+  const dax = a2.x - a1.x;
+  const day = a2.y - a1.y;
+  const dbx = b2.x - b1.x;
+  const dby = b2.y - b1.y;
+  const denom = dax * dby - day * dbx;
+  if (Math.abs(denom) < 1e-9) return null;
+
+  const s = ((b1.x - a1.x) * dby - (b1.y - a1.y) * dbx) / denom;
+  const t = ((b1.x - a1.x) * day - (b1.y - a1.y) * dax) / denom;
+  const eps = 1e-6;
+  if (s > eps && s < 1 - eps && t > eps && t < 1 - eps) {
+    return {
+      x: a1.x + s * dax,
+      y: a1.y + s * day,
+    };
+  }
+  return null;
+}
+
+export function collapseInvertedEdges(
+  rawPts: { x: number; y: number }[],
+  origPts: { x: number; y: number }[]
+): { x: number; y: number }[] {
+  if (!rawPts || rawPts.length < 3 || rawPts.length !== origPts.length) {
+    return rawPts ? rawPts.map((p) => ({ x: p.x, y: p.y })) : [];
+  }
+
+  let nodes = rawPts.map((pt, i) => {
+    const nextOrig = origPts[(i + 1) % origPts.length];
+    return {
+      pt: { x: pt.x, y: pt.y },
+      dOrig: { x: nextOrig.x - origPts[i].x, y: nextOrig.y - origPts[i].y },
+    };
+  });
+
+  const maxPasses = origPts.length;
+  for (let pass = 0; pass < maxPasses; pass++) {
+    if (nodes.length <= 3) break;
+    let collapsedInPass = false;
+    const len = nodes.length;
+
+    for (let i = 0; i < len; i++) {
+      const prevIdx = (i - 1 + len) % len;
+      const nextIdx = (i + 1) % len;
+      const next2Idx = (i + 2) % len;
+
+      const currRaw = nodes[i].pt;
+      const nextRaw = nodes[nextIdx].pt;
+      const dOrig = nodes[i].dOrig;
+      const origLen = Math.hypot(dOrig.x, dOrig.y);
+      if (origLen < 1e-6) continue;
+
+      const dNewX = nextRaw.x - currRaw.x;
+      const dNewY = nextRaw.y - currRaw.y;
+      const dot = dNewX * dOrig.x + dNewY * dOrig.y;
+
+      if (dot <= 0) {
+        const prevRaw = nodes[prevIdx].pt;
+        const next2Raw = nodes[next2Idx].pt;
+        const dPrev = nodes[prevIdx].dOrig;
+        const dNext = nodes[nextIdx].dOrig;
+        const lPrev = Math.hypot(dPrev.x, dPrev.y) || 1;
+        const lNext = Math.hypot(dNext.x, dNext.y) || 1;
+        const adjCross = Math.abs((dPrev.x / lPrev) * (dNext.y / lNext) - (dPrev.y / lPrev) * (dNext.x / lNext));
+
+        // Si las aristas adyacentes son antiparalelas (ej. brazo estrecho de un lote en L o U),
+        // preservar el lazo para que pruneSelfIntersections lo corte exactamente contra el cuerpo principal
+        const adjDot = (dPrev.x / lPrev) * (dNext.x / lNext) + (dPrev.y / lPrev) * (dNext.y / lNext);
+        if (adjCross < 0.15 && adjDot < -0.5) {
+          continue;
+        }
+
+        const mid = {
+          x: 0.5 * (currRaw.x + nextRaw.x),
+          y: 0.5 * (currRaw.y + nextRaw.y),
+        };
+        let mergedPt = mid;
+
+        // Intersección de las rectas de las aristas adyacentes anterior y siguiente
+        const a1 = prevRaw;
+        const a2 = currRaw;
+        const b1 = nextRaw;
+        const b2 = next2Raw;
+        const dax = a2.x - a1.x;
+        const day = a2.y - a1.y;
+        const dbx = b2.x - b1.x;
+        const dby = b2.y - b1.y;
+        const denom = dax * dby - day * dbx;
+        if (Math.abs(denom) > 1e-7) {
+          const s = ((b1.x - a1.x) * dby - (b1.y - a1.y) * dbx) / denom;
+          const hit = { x: a1.x + s * dax, y: a1.y + s * day };
+          if (Math.hypot(hit.x - mid.x, hit.y - mid.y) < 3 * origLen) {
+            mergedPt = hit;
+          }
+        }
+
+        const updatedNode = {
+          pt: mergedPt,
+          dOrig: nodes[nextIdx].dOrig,
+        };
+        const nextNodes: typeof nodes = [];
+        for (let k = 0; k < len; k++) {
+          if (k === i) {
+            nextNodes.push(updatedNode);
+          } else if (k === nextIdx) {
+            continue;
+          } else {
+            nextNodes.push(nodes[k]);
+          }
+        }
+        nodes = nextNodes;
+        collapsedInPass = true;
+        break;
+      }
+    }
+    if (!collapsedInPass) break;
+  }
+
+  return cleanPolygonVertices(nodes.map((n) => n.pt));
+}
+
+export function pruneSelfIntersections(
+  pts: { x: number; y: number }[],
+  expectedSign: number
+): { x: number; y: number }[] {
+  if (!pts || pts.length < 3) return [];
+  let ring = pts.map((p) => ({ x: p.x, y: p.y }));
+  const maxPasses = pts.length * 3;
+
+  for (let pass = 0; pass < maxPasses; pass++) {
+    let splitDone = false;
+    const len = ring.length;
+    if (len < 4) break;
+
+    for (let i = 0; i < len && !splitDone; i++) {
+      const iNext = (i + 1) % len;
+      for (let j = i + 2; j < len && !splitDone; j++) {
+        if (i === 0 && j === len - 1) continue;
+        const jNext = (j + 1) % len;
+        const hit = intersectSegmentsStrict(ring[i], ring[iNext], ring[j], ring[jNext]);
+        if (hit) {
+          const loop1 = [hit, ...ring.slice(i + 1, j + 1)];
+          const loop2 = [...ring.slice(0, i + 1), hit, ...ring.slice(j + 1)];
+
+          const score1 = signedPolygonArea2D(loop1) * expectedSign;
+          const score2 = signedPolygonArea2D(loop2) * expectedSign;
+
+          if (score1 >= score2 && score1 > 1e-5 && loop1.length >= 3) {
+            ring = loop1;
+          } else if (score2 > 1e-5 && loop2.length >= 3) {
+            ring = loop2;
+          } else {
+            return [];
+          }
+          splitDone = true;
+        }
+      }
+    }
+    if (!splitDone) break;
+  }
+  return ring;
+}
+
+function hasAnySelfIntersection(pts: { x: number; y: number }[]): boolean {
+  const len = pts.length;
+  if (len < 4) return false;
+  for (let i = 0; i < len; i++) {
+    const iNext = (i + 1) % len;
+    for (let j = i + 2; j < len; j++) {
+      if (i === 0 && j === len - 1) continue;
+      const jNext = (j + 1) % len;
+      if (intersectSegmentsStrict(pts[i], pts[iNext], pts[j], pts[jNext])) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Calcula el polígono interior de retranqueo mediante bisectrices acotadas y
+ * limpieza determinista de 4 etapas para lotes regulares y cóncavos ("L", "U").
+ */
 export function insetPolygonBisector(
   pts: { x: number; y: number }[],
   offsetMeters: number,
   meshData: MeshData | undefined,
   n: number
 ): { x: number; y: number }[] | null {
-  if (pts.length < 3) return null;
+  const cleaned = cleanPolygonVertices(pts);
+  if (cleaned.length < 3) return null;
   if (offsetMeters <= 0.01) {
-    return pts.map((p) => ({ x: p.x, y: p.y }));
+    return cleaned.map((p) => ({ x: p.x, y: p.y }));
   }
 
-  let area = 0;
-  for (let i = 0; i < pts.length; i++) {
-    const j = (i + 1) % pts.length;
-    area += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
-  }
-  const isClockwise = area > 0;
+  const origSignedArea = signedPolygonArea2D(cleaned);
+  if (Math.abs(origSignedArea) <= 1e-4) return null;
+  const isClockwise = origSignedArea > 0;
   const sign = isClockwise ? 1 : -1;
+  const absOrigArea = Math.abs(origSignedArea);
 
   const wMeters = meshData && meshData.w > 0 ? meshData.w : 150;
   const offsetGrid = offsetMeters * (n / wMeters);
 
-  // Also check polygon bounding box to prevent self-inversion on narrow lots
+  // Verificar bounding box para prevenir auto-inversión en lotes demasiado angostos
   let minX = Infinity,
     maxX = -Infinity,
     minY = Infinity,
     maxY = -Infinity;
-  for (const p of pts) {
+  for (const p of cleaned) {
     if (p.x < minX) minX = p.x;
     if (p.x > maxX) maxX = p.x;
     if (p.y < minY) minY = p.y;
@@ -139,11 +401,11 @@ export function insetPolygonBisector(
     return null;
   }
 
-  const newPts: { x: number; y: number }[] = [];
-  for (let i = 0; i < pts.length; i++) {
-    const prev = pts[(i - 1 + pts.length) % pts.length];
-    const curr = pts[i];
-    const next = pts[(i + 1) % pts.length];
+  const rawPts: { x: number; y: number }[] = [];
+  for (let i = 0; i < cleaned.length; i++) {
+    const prev = cleaned[(i - 1 + cleaned.length) % cleaned.length];
+    const curr = cleaned[i];
+    const next = cleaned[(i + 1) % cleaned.length];
 
     let v1x = curr.x - prev.x;
     let v1y = curr.y - prev.y;
@@ -167,7 +429,7 @@ export function insetPolygonBisector(
     let by = n1y + n2y;
     const blen = Math.hypot(bx, by);
 
-    if (blen < 0.0001) {
+    if (blen < 1e-4) {
       bx = n1x;
       by = n1y;
     } else {
@@ -176,25 +438,105 @@ export function insetPolygonBisector(
     }
 
     const dot = n1x * bx + n1y * by;
-    // Clamp miter spike on very acute angles
-    const dist = Math.abs(dot) > 0.25 ? offsetGrid / dot : offsetGrid * 2;
+    // Acotamiento continuo del factor de inglete en esquinas agudas/cóncavas (per D-03)
+    const miterScale = dot > 1e-4 ? Math.min(2.5, 1 / dot) : 1.0;
+    const dist = offsetGrid * miterScale;
 
-    newPts.push({
+    rawPts.push({
       x: curr.x + bx * dist,
       y: curr.y + by * dist,
     });
   }
 
-  let newArea = 0;
-  for (let i = 0; i < newPts.length; i++) {
-    const j = (i + 1) % newPts.length;
-    newArea += newPts[i].x * newPts[j].y - newPts[j].x * newPts[i].y;
+  const collapsedPts = collapseInvertedEdges(rawPts, cleaned);
+  if (collapsedPts.length < 3) return null;
+
+  const prunedPts = pruneSelfIntersections(collapsedPts, sign);
+  if (prunedPts.length < 3) return null;
+
+  const finalPts = cleanPolygonVertices(prunedPts);
+  if (finalPts.length < 3) return null;
+
+  // Validar contención en el bounding box original, ausencia de auto-intersecciones y área válida
+  for (const p of finalPts) {
+    if (
+      !Number.isFinite(p.x) ||
+      !Number.isFinite(p.y) ||
+      p.x < minX - 1e-3 ||
+      p.x > maxX + 1e-3 ||
+      p.y < minY - 1e-3 ||
+      p.y > maxY + 1e-3
+    ) {
+      return null;
+    }
   }
-  if ((isClockwise && newArea <= 0) || (!isClockwise && newArea >= 0)) {
+
+  if (hasAnySelfIntersection(finalPts)) {
     return null;
   }
 
-  return newPts;
+  const finalSignedArea = signedPolygonArea2D(finalPts);
+  if (finalSignedArea * sign <= 1e-4 || Math.abs(finalSignedArea) >= absOrigArea) {
+    return null;
+  }
+
+  return finalPts;
+}
+
+/**
+ * Acota el desplazamiento (dx, dy) de un polígono de lote como cuerpo rígido
+ * dentro de los límites de la grilla [0, n - 1] x [0, m - 1] (per D-02).
+ */
+export function clampLotDragOffset(
+  basePts: { x: number; y: number }[],
+  dx: number,
+  dy: number,
+  n: number,
+  m: number
+): { x: number; y: number } {
+  if (!basePts || basePts.length === 0) return { x: 0, y: 0 };
+  let minX = Infinity,
+    maxX = -Infinity,
+    minY = Infinity,
+    maxY = -Infinity;
+  for (const p of basePts) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  const maxStepX = Math.max(0, n - 1);
+  const maxStepY = Math.max(0, m - 1);
+  const clampedDx = Math.max(-minX, Math.min(maxStepX - maxX, dx));
+  const clampedDy = Math.max(-minY, Math.min(maxStepY - maxY, dy));
+  return {
+    x: Number.isFinite(clampedDx) ? clampedDx : 0,
+    y: Number.isFinite(clampedDy) ? clampedDy : 0,
+  };
+}
+
+/**
+ * Traslada el polígono del lote como cuerpo rígido dentro de [0, n - 1] x [0, m - 1]
+ * y remuestrea la cota de terreno elev de cada vértice con getGridElevAt (per D-02).
+ */
+export function translateLotPolygon(
+  basePts: { x: number; y: number }[],
+  dx: number,
+  dy: number,
+  n: number,
+  m: number,
+  getGridElevAt: (x: number, y: number) => number
+): Point3D[] {
+  const { x: cdx, y: cdy } = clampLotDragOffset(basePts, dx, dy, n, m);
+  return basePts.map((p) => {
+    const nx = Math.max(0, Math.min(n - 1, p.x + cdx));
+    const ny = Math.max(0, Math.min(m - 1, p.y + cdy));
+    return {
+      x: nx,
+      y: ny,
+      elev: getGridElevAt(nx, ny),
+    };
+  });
 }
 
 export function convexHull3D(points: Point3D[]): Point3D[] {
@@ -525,8 +867,9 @@ export function computeOgucModel(params: {
     const inDyGrid = ((-outNy * maxRunMeters) / hMeters) * m;
 
     // Connect toward corresponding inset vertices or inward projection
-    const insetP1 = topRoofPtsForRasante[i];
-    const insetP2 = topRoofPtsForRasante[j];
+    const hasMatchingRoofVertices = topRoofPtsForRasante.length === lotPolygon.length;
+    const insetP1 = hasMatchingRoofVertices ? topRoofPtsForRasante[i] : undefined;
+    const insetP2 = hasMatchingRoofVertices ? topRoofPtsForRasante[j] : undefined;
 
     const top1: Point3D = insetP1
       ? {
