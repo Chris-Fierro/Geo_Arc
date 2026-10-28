@@ -51,21 +51,21 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| OGUC-01 | Phase 1 | Pending |
-| OGUC-02 | Phase 1 | Pending |
-| OGUC-03 | Phase 1 | Pending |
-| OGUC-04 | Phase 1 | Pending |
-| CAD-01 | Phase 2 | Pending |
-| CAD-02 | Phase 2 | Pending |
-| CAD-03 | Phase 2 | Pending |
-| CAD-04 | Phase 2 | Pending |
-| PERF-01 | Phase 3 | Pending |
-| PERF-02 | Phase 3 | Pending |
-| PERF-03 | Phase 3 | Pending |
-| PERF-04 | Phase 3 | Pending |
-| QUAL-01 | Phase 4 | Pending |
-| QUAL-02 | Phase 2 | Pending |
-| QUAL-03 | Phase 4 | Pending |
+| OGUC-01 | Phase 1: Precisión Normativa OGUC y Motor Solar | Pending |
+| OGUC-02 | Phase 1: Precisión Normativa OGUC y Motor Solar | Pending |
+| OGUC-03 | Phase 1: Precisión Normativa OGUC y Motor Solar | Pending |
+| OGUC-04 | Phase 1: Precisión Normativa OGUC y Motor Solar | Pending |
+| CAD-01 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Pending |
+| CAD-02 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Pending |
+| CAD-03 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Pending |
+| CAD-04 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Pending |
+| QUAL-02 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Pending |
+| PERF-01 | Phase 3: Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | Pending |
+| PERF-02 | Phase 3: Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | Pending |
+| PERF-03 | Phase 3: Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | Pending |
+| PERF-04 | Phase 3: Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | Pending |
+| QUAL-01 | Phase 4: Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura | Pending |
+| QUAL-03 | Phase 4: Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura | Pending |
 
 **Coverage:**
 - v1 requirements: 15 total
@@ -74,4 +74,4 @@
 
 ---
 *Requirements defined: 2026-10-28*
-*Last updated: 2026-10-28 after initial definition*
+*Last updated: 2026-10-28 after roadmap creation*
