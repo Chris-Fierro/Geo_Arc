@@ -2,7 +2,7 @@
 phase: "01"
 slug: "precisi-n-normativa-oguc-y-motor-solar"
 status: draft
-nyquist_compliant: false
+nyquist_compliant: true
 wave_0_complete: true
 created: "2026-10-28"
 ---

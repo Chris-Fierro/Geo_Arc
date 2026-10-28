@@ -28,7 +28,13 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Al arrastrar la posición del volumen o lote en el visor `Topográfico (SVG)`, el desplazamiento se refleja inmediatamente al cambiar al visor `3D Satelital` y se preserva íntegramente al exportar y volver a cargar un archivo `.geoarc`.
   3. Al dibujar un lote irregular cóncavo (en forma de "L" o "U"), el algoritmo de distanciamiento interior (`insetPolygonBisector`) genera polígonos válidos sin aristas auto-intersectadas ni artefactos en la extrusión 3D ni en el cálculo de superficie.
   4. Al seleccionar cualquier fecha del año (incluyendo `YYYY-01-01` y periodos de horario de verano UTC-3 o invierno UTC-4 en Chile, o ubicaciones en otras longitudes), el Heliodón calcula la altitud y azimut solar en hora local exacta sin desfase de medianoche UTC.
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+**Wave 1**
+- [ ] 01-01-PLAN.md — Retranqueo robusto en lotes cóncavos (`insetPolygonBisector`), proyección multinivel de sombras OGUC (`projectMultiTierDirectionalShadowOnTerrain`) y traslación rígida de lote (`translateLotPolygon`) (`OGUC-01`, `OGUC-03`)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 01-02-PLAN.md — Huso horario dinámico y parseo de fecha local en `SunPosition.ts` / `App.tsx` y sincronización bidireccional de arrastre de lote/volumen en `ContourViewer.tsx` (`OGUC-02`, `OGUC-04`)
 **UI hint**: no
 
 ### Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada
