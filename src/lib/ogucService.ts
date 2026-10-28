@@ -676,6 +676,74 @@ function projectDirectionalShadowOnTerrain(
   return convexHull3D([...basePts, ...projectedPts]);
 }
 
+/**
+ * Proyecta y une mediante convexHull3D las sombras direccionales de todos los niveles
+ * volumétricos activos (continuous, main, upper_stepped), aterrizando cada huella a la
+ * cota real del terreno natural (getGridElevAt) (per D-01).
+ */
+export function projectMultiTierDirectionalShadowOnTerrain(
+  tiers: VolumeTier[],
+  fallbackFootprintPts: Point3D[],
+  fallbackTopElevs: number[],
+  angleDeg: number,
+  azimuthDeg: number,
+  meshData: MeshData | undefined,
+  n: number,
+  m: number,
+  getGridElevAt: (x: number, y: number) => number
+): Point3D[] {
+  if (!tiers || tiers.length === 0) {
+    return projectDirectionalShadowOnTerrain(
+      fallbackFootprintPts,
+      fallbackTopElevs,
+      angleDeg,
+      azimuthDeg,
+      meshData,
+      n,
+      m,
+      getGridElevAt
+    );
+  }
+
+  const combinedShadowPts: Point3D[] = [];
+  for (const tier of tiers) {
+    if (!tier.basePts || tier.basePts.length < 3) continue;
+    // Aterrizar cada vértice base a la cota real del terreno para medir la altura total del techo sobre el suelo
+    const groundedBasePts: Point3D[] = tier.basePts.map((p) => ({
+      x: p.x,
+      y: p.y,
+      elev: getGridElevAt(p.x, p.y),
+    }));
+    const roofElevs: number[] = tier.roofPts.map((rp) => rp.elev);
+    const tierShadowHull = projectDirectionalShadowOnTerrain(
+      groundedBasePts,
+      roofElevs,
+      angleDeg,
+      azimuthDeg,
+      meshData,
+      n,
+      m,
+      getGridElevAt
+    );
+    combinedShadowPts.push(...tierShadowHull);
+  }
+
+  if (combinedShadowPts.length < 3) {
+    return projectDirectionalShadowOnTerrain(
+      fallbackFootprintPts,
+      fallbackTopElevs,
+      angleDeg,
+      azimuthDeg,
+      meshData,
+      n,
+      m,
+      getGridElevAt
+    );
+  }
+
+  return convexHull3D(combinedShadowPts);
+}
+
 export function computeOgucModel(params: {
   rawLotPts: { x: number; y: number }[];
   ogucParams: OgucParams;
@@ -809,7 +877,8 @@ export function computeOgucModel(params: {
     elev: mainBaseElev + effectiveHeight,
   }));
 
-  if (hasUpperStep && effectiveHeight > threshold105) {
+  const upperStepStartH = Math.max(threshold105, contBaseH);
+  if (hasUpperStep && effectiveHeight > upperStepStartH + 0.05) {
     const upperInset =
       insetPolygonBisector(lotPolygon, totalUpperSetbackMeters, meshData, n) || mainInset;
     const upperGroundPts = upperInset.map((p) => ({
@@ -817,10 +886,10 @@ export function computeOgucModel(params: {
       y: p.y,
       elev: getGridElevAt(p.x, p.y),
     }));
-    const baseZ105 = mainBaseElev + threshold105;
+    const baseZUpper = mainBaseElev + upperStepStartH;
     const topZ = mainBaseElev + effectiveHeight;
 
-    const basePts = upperGroundPts.map((p) => ({ x: p.x, y: p.y, elev: baseZ105 }));
+    const basePts = upperGroundPts.map((p) => ({ x: p.x, y: p.y, elev: baseZUpper }));
     const roofPts = upperGroundPts.map((p) => ({ x: p.x, y: p.y, elev: topZ }));
 
     tiers.push({
@@ -828,7 +897,7 @@ export function computeOgucModel(params: {
       label: `Cuerpo > 10.5m Art. 2.6.12 (Dist. ${totalUpperSetbackMeters.toFixed(1)}m)`,
       basePts,
       roofPts,
-      baseOffsetZ: threshold105,
+      baseOffsetZ: upperStepStartH,
       topOffsetZ: effectiveHeight,
       setbackApplied: totalUpperSetbackMeters,
     });
@@ -947,17 +1016,14 @@ export function computeOgucModel(params: {
     )
   );
 
-  // Proposed Volume Shadow: combines the highest active tier footprint & height
-  const activeTier = tiers[tiers.length - 1];
-  const proposedFootprint = activeTier ? activeTier.basePts : mainGroundPts;
-  const proposedTopElevs = activeTier
-    ? activeTier.roofPts.map((rp) => rp.elev)
-    : mainGroundPts.map((p) => p.elev + effectiveHeight);
+  // Proposed Volume Shadow: combines the footprints and heights of all active tiers grounded on terrain (per D-01)
+  const fallbackProposedElevs = mainGroundPts.map((p) => p.elev + effectiveHeight);
 
   const proposedPolygons: Point3D[][] = directions.map((d) =>
-    projectDirectionalShadowOnTerrain(
-      proposedFootprint,
-      proposedTopElevs,
+    projectMultiTierDirectionalShadowOnTerrain(
+      tiers,
+      mainGroundPts,
+      fallbackProposedElevs,
       d.angle,
       d.azimuth,
       meshData,
