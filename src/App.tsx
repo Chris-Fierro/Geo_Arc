@@ -456,6 +456,7 @@ export default function App() {
         meshData,
         satelliteDataUrl: showSatelliteLayer ? meshData.satelliteTexture : undefined,
         worldFile: meshData.satelliteWorldFile,
+        crs,
         zExaggeration,
         fileName: fileName.replace(/\.[^/.]+$/, ''),
         includeBuildings: showContextBuildings
@@ -1054,7 +1055,8 @@ export default function App() {
                   ) : (
                     <ContourViewer 
                       interval={interval} 
-                       fileName={fileName} 
+                      fileName={fileName} 
+                      crs={crs}
                       meshData={meshData} 
                       zExaggeration={zExaggeration} 
                       colorPalette={colorPalette}

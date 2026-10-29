@@ -2,14 +2,62 @@ import * as THREE from 'three';
 import { OBJExporter, GLTFExporter } from 'three-stdlib';
 import * as fflate from 'fflate';
 import type { MeshData } from './meshProcessor';
+import { clipWayToBBox } from './ogucService';
+import { projectPointToCrs, generateWorldFileForCrs } from './crsService';
 
 export interface Export3DOptions {
   meshData: MeshData;
   satelliteDataUrl?: string;
   worldFile?: string;
+  crs?: string;
   zExaggeration?: number;
   fileName?: string;
   includeBuildings?: boolean;
+}
+
+export interface DxfExportParams {
+  meshData: MeshData;
+  contours: any[];
+  crs?: string;
+  layerVisibility?: { buildings?: boolean; highways?: boolean; waterways?: boolean };
+  customLotPts?: { x: number; y: number; elev: number }[] | null;
+}
+
+/**
+ * Samples continuous elevation from a DEM grid using bilinear interpolation.
+ * Avoids discrete staircasing artifacts on buildings and roads.
+ */
+export function sampleBilinearElevation(
+  grid: number[],
+  cols: number,
+  rows: number,
+  u: number,
+  v: number,
+  fallback: number = 0
+): number {
+  if (!grid || grid.length === 0 || cols <= 0 || rows <= 0) return fallback;
+  const uClamped = Math.max(0, Math.min(cols - 1, Number.isFinite(u) ? u : 0));
+  const vClamped = Math.max(0, Math.min(rows - 1, Number.isFinite(v) ? v : 0));
+
+  const c0 = Math.floor(uClamped);
+  const c1 = Math.min(cols - 1, c0 + 1);
+  const r0 = Math.floor(vClamped);
+  const r1 = Math.min(rows - 1, r0 + 1);
+
+  const tx = uClamped - c0;
+  const ty = vClamped - r0;
+
+  const v00 = grid[r0 * cols + c0] ?? fallback;
+  const v10 = grid[r0 * cols + c1] ?? fallback;
+  const v01 = grid[r1 * cols + c0] ?? fallback;
+  const v11 = grid[r1 * cols + c1] ?? fallback;
+
+  return (
+    (1 - tx) * (1 - ty) * v00 +
+    tx * (1 - ty) * v10 +
+    (1 - tx) * ty * v01 +
+    tx * ty * v11
+  );
 }
 
 /**
@@ -89,29 +137,7 @@ export function buildThreeSceneFromMeshData(
     const getElevAtM = (lon: number, lat: number) => {
       const u = ((lon - minLon) / widthSpan) * (cols - 1);
       const v = ((maxLat - lat) / heightSpan) * (rows - 1);
-      const uClamped = Math.max(0, Math.min(cols - 1, u));
-      const vClamped = Math.max(0, Math.min(rows - 1, v));
-
-      const c0 = Math.floor(uClamped);
-      const c1 = Math.min(cols - 1, c0 + 1);
-      const r0 = Math.floor(vClamped);
-      const r1 = Math.min(rows - 1, r0 + 1);
-
-      const tx = uClamped - c0;
-      const ty = vClamped - r0;
-
-      const v00 = meshData.grid[r0 * cols + c0] ?? minEv;
-      const v10 = meshData.grid[r0 * cols + c1] ?? minEv;
-      const v01 = meshData.grid[r1 * cols + c0] ?? minEv;
-      const v11 = meshData.grid[r1 * cols + c1] ?? minEv;
-
-      const interpolated =
-        (1 - tx) * (1 - ty) * v00 +
-        tx * (1 - ty) * v10 +
-        (1 - tx) * ty * v01 +
-        tx * ty * v11;
-
-      return interpolated - minEv;
+      return sampleBilinearElevation(meshData.grid, cols, rows, u, v, minEv) - minEv;
     };
 
     const buildingsGroup = new THREE.Group();
@@ -120,7 +146,7 @@ export function buildThreeSceneFromMeshData(
     const elements = meshData.buildings.elements;
     for (const el of elements) {
       // Process ways and outer relation members
-      let geometriesToProcess: { lat: number; lon: number }[][] = [];
+      const geometriesToProcess: { lat: number; lon: number }[][] = [];
       if (el.type === 'way' && el.tags?.building && el.geometry?.length >= 3) {
         geometriesToProcess.push(el.geometry);
       } else if (el.type === 'relation' && el.tags?.building && Array.isArray(el.members)) {
@@ -141,7 +167,7 @@ export function buildThreeSceneFromMeshData(
       for (const geomCoords of geometriesToProcess) {
         try {
           // Strip duplicate closing coordinate if present
-          let pts = [...geomCoords];
+          const pts = [...geomCoords];
           if (pts.length > 3) {
             const first = pts[0];
             const last = pts[pts.length - 1];
@@ -242,6 +268,269 @@ export function triggerBrowserDownload(blob: Blob, filename: string) {
 }
 
 /**
+ * Generates AutoCAD 2000 (AC1015) DXF format content in meters ($INSUNITS 6, $MEASUREMENT 1).
+ * Features Liang-Barsky way clipping, OSM relation multipolygon buildings, bilinear Z elevation,
+ * and deterministic reprojection according to active CRS.
+ */
+export function generateDxfContent(params: DxfExportParams): string {
+  const {
+    meshData,
+    contours,
+    crs = 'EPSG:32719',
+    layerVisibility = { buildings: true, highways: true, waterways: true },
+    customLotPts,
+  } = params;
+
+  const cols = meshData.cols || meshData.size || 150;
+  const rows = meshData.rows || meshData.size || 150;
+
+  // Header and layer definitions
+  const lines: string[] = [
+    '0', 'SECTION',
+    '2', 'HEADER',
+    '9', '$ACADVER', '1', 'AC1015',
+    '9', '$HANDSEED', '5', 'FFFF',
+    '9', '$MEASUREMENT', '70', '1', // 1 = Metric
+    '9', '$INSUNITS', '70', '6', // 6 = Meters
+    '9', '$LUNITS', '70', '2', // 2 = Decimal
+    '0', 'ENDSEC',
+    '0', 'SECTION',
+    '2', 'TABLES',
+    '0', 'TABLE',
+    '2', 'LAYER',
+    '70', '5',
+    '0', 'LAYER', '2', 'CONTOURS', '70', '0', '62', '2', '6', 'CONTINUOUS',
+    '0', 'LAYER', '2', 'BUILDINGS', '70', '0', '62', '7', '6', 'CONTINUOUS',
+    '0', 'LAYER', '2', 'HIGHWAYS', '70', '0', '62', '8', '6', 'CONTINUOUS',
+    '0', 'LAYER', '2', 'WATERWAYS', '70', '0', '62', '5', '6', 'CONTINUOUS',
+    '0', 'LAYER', '2', 'LOT_BOUNDARY', '70', '0', '62', '1', '6', 'CONTINUOUS',
+    '0', 'ENDTAB',
+    '0', 'ENDSEC',
+    '0', 'SECTION',
+    '2', 'ENTITIES'
+  ];
+
+  // Projection helper for point coordinates
+  const projectCoord = (lon: number, lat: number, gx: number, gy: number): { x: number; y: number } => {
+    if (meshData.bbox) {
+      return projectPointToCrs(lat, lon, crs);
+    }
+    const x = (gx / Math.max(1, cols - 1)) * meshData.w;
+    const y = (1.0 - gy / Math.max(1, rows - 1)) * meshData.h;
+    return { x, y };
+  };
+
+  // 1. Contours (CONTOURS)
+  if (Array.isArray(contours)) {
+    for (const c of contours) {
+      const z = Number(c.value) || 0;
+      let rawLines: any[] = [];
+      if (c.type === 'LineString') {
+        rawLines = [c.coordinates];
+      } else if (c.type === 'MultiLineString' || c.type === 'Polygon') {
+        rawLines = c.coordinates;
+      } else if (c.type === 'MultiPolygon') {
+        rawLines = c.coordinates.flat(1);
+      } else if (Array.isArray(c.coordinates)) {
+        if (c.coordinates.length > 0 && typeof c.coordinates[0][0] === 'number') {
+          rawLines = [c.coordinates];
+        } else {
+          rawLines = c.coordinates.flat(1);
+        }
+      }
+
+      for (const line of rawLines) {
+        if (!Array.isArray(line) || line.length < 2) continue;
+        lines.push(
+          '0', 'POLYLINE',
+          '8', 'CONTOURS',
+          '66', '1',
+          '70', '8', // 3D polyline
+          '10', '0.0', '20', '0.0', '30', z.toFixed(3)
+        );
+        for (const pt of line) {
+          const px = pt[0];
+          const py = pt[1];
+          let proj: { x: number; y: number };
+          if (meshData.bbox) {
+            const { minLon, maxLon, minLat, maxLat } = meshData.bbox;
+            const lon = minLon + (px / Math.max(1, cols - 1)) * (maxLon - minLon);
+            const lat = maxLat - (py / Math.max(1, rows - 1)) * (maxLat - minLat);
+            proj = projectCoord(lon, lat, px, py);
+          } else {
+            proj = projectCoord(0, 0, px, py);
+          }
+          lines.push(
+            '0', 'VERTEX',
+            '8', 'CONTOURS',
+            '70', '32', // 3D vertex
+            '10', proj.x.toFixed(3),
+            '20', proj.y.toFixed(3),
+            '30', z.toFixed(3)
+          );
+        }
+        lines.push('0', 'SEQEND');
+      }
+    }
+  }
+
+  // 2. Highways & Waterways with Liang-Barsky clipping (HIGHWAYS, WATERWAYS)
+  if (meshData.buildings?.elements && meshData.bbox) {
+    const { minLon, maxLon, minLat, maxLat } = meshData.bbox;
+    const widthSpan = maxLon - minLon || 1;
+    const heightSpan = maxLat - minLat || 1;
+
+    for (const el of meshData.buildings.elements) {
+      const isHighway = !!el.tags?.highway && layerVisibility.highways !== false;
+      const isWaterway = !!el.tags?.waterway && layerVisibility.waterways !== false;
+      if (!isHighway && !isWaterway) continue;
+      if (!Array.isArray(el.geometry) || el.geometry.length < 2) continue;
+
+      const layerName = isHighway ? 'HIGHWAYS' : 'WATERWAYS';
+      const clippedLines = clipWayToBBox(el.geometry, meshData.bbox, 15);
+
+      for (const line of clippedLines) {
+        if (line.length < 2) continue;
+        lines.push(
+          '0', 'POLYLINE',
+          '8', layerName,
+          '66', '1',
+          '70', '8', // 3D open polyline
+          '10', '0.0', '20', '0.0', '30', '0.0'
+        );
+        for (const pt of line) {
+          const gx = ((pt.lon - minLon) / widthSpan) * (cols - 1);
+          const gy = ((maxLat - pt.lat) / heightSpan) * (rows - 1);
+          const z = sampleBilinearElevation(meshData.grid, cols, rows, gx, gy, meshData.minEv);
+          const proj = projectCoord(pt.lon, pt.lat, gx, gy);
+          lines.push(
+            '0', 'VERTEX',
+            '8', layerName,
+            '70', '32',
+            '10', proj.x.toFixed(3),
+            '20', proj.y.toFixed(3),
+            '30', z.toFixed(3)
+          );
+        }
+        lines.push('0', 'SEQEND');
+      }
+    }
+  }
+
+  // 3. Buildings with OSM relations support & bilinear Z (BUILDINGS)
+  if (layerVisibility.buildings !== false && meshData.buildings?.elements && meshData.bbox) {
+    const { minLon, maxLon, minLat, maxLat } = meshData.bbox;
+    const widthSpan = maxLon - minLon || 1;
+    const heightSpan = maxLat - minLat || 1;
+
+    for (const el of meshData.buildings.elements) {
+      if (!el.tags?.building) continue;
+
+      const geometries: { lon: number; lat: number }[][] = [];
+      if (el.type === 'way' && Array.isArray(el.geometry) && el.geometry.length >= 3) {
+        geometries.push(el.geometry);
+      } else if (el.type === 'relation' && Array.isArray(el.members)) {
+        for (const m of el.members) {
+          if (m.role === 'outer' && Array.isArray(m.geometry) && m.geometry.length >= 3) {
+            geometries.push(m.geometry);
+          }
+        }
+      }
+
+      for (const geom of geometries) {
+        let sumLon = 0;
+        let sumLat = 0;
+        for (const pt of geom) {
+          sumLon += pt.lon;
+          sumLat += pt.lat;
+        }
+        const avgLon = sumLon / geom.length;
+        const avgLat = sumLat / geom.length;
+        if (avgLon < minLon || avgLon > maxLon || avgLat < minLat || avgLat > maxLat) {
+          continue;
+        }
+
+        lines.push(
+          '0', 'POLYLINE',
+          '8', 'BUILDINGS',
+          '66', '1',
+          '70', '9', // Closed 3D polyline (8 + 1)
+          '10', '0.0', '20', '0.0', '30', '0.0'
+        );
+
+        for (const pt of geom) {
+          const gx = ((pt.lon - minLon) / widthSpan) * (cols - 1);
+          const gy = ((maxLat - pt.lat) / heightSpan) * (rows - 1);
+          const z = sampleBilinearElevation(meshData.grid, cols, rows, gx, gy, meshData.minEv);
+          const proj = projectCoord(pt.lon, pt.lat, gx, gy);
+          lines.push(
+            '0', 'VERTEX',
+            '8', 'BUILDINGS',
+            '70', '32',
+            '10', proj.x.toFixed(3),
+            '20', proj.y.toFixed(3),
+            '30', z.toFixed(3)
+          );
+        }
+        lines.push('0', 'SEQEND');
+      }
+    }
+  }
+
+  // 4. Custom Lot Boundary (LOT_BOUNDARY)
+  if (customLotPts && customLotPts.length >= 3) {
+    lines.push(
+      '0', 'POLYLINE',
+      '8', 'LOT_BOUNDARY',
+      '66', '1',
+      '70', '9', // Closed 3D polyline
+      '10', '0.0', '20', '0.0', '30', '0.0'
+    );
+    for (const pt of customLotPts) {
+      let x = 0;
+      let y = 0;
+      if (meshData.bbox) {
+        const { minLon, maxLon, minLat, maxLat } = meshData.bbox;
+        const lon = minLon + (pt.x / Math.max(1, cols - 1)) * (maxLon - minLon);
+        const lat = maxLat - (pt.y / Math.max(1, rows - 1)) * (maxLat - minLat);
+        const proj = projectCoord(lon, lat, pt.x, pt.y);
+        x = proj.x;
+        y = proj.y;
+      } else {
+        x = (pt.x / Math.max(1, cols - 1)) * meshData.w;
+        y = (1.0 - pt.y / Math.max(1, rows - 1)) * meshData.h;
+      }
+      const z = Number.isFinite(pt.elev)
+        ? pt.elev
+        : sampleBilinearElevation(meshData.grid, cols, rows, pt.x, pt.y, meshData.minEv);
+      lines.push(
+        '0', 'VERTEX',
+        '8', 'LOT_BOUNDARY',
+        '70', '32',
+        '10', x.toFixed(3),
+        '20', y.toFixed(3),
+        '30', z.toFixed(3)
+      );
+    }
+    lines.push('0', 'SEQEND');
+  }
+
+  lines.push('0', 'ENDSEC', '0', 'EOF');
+  return lines.join('\n');
+}
+
+/**
+ * Serializes and triggers browser download of the DXF file.
+ */
+export function exportToDxf(params: DxfExportParams & { fileName?: string }): void {
+  const dxf = generateDxfContent(params);
+  const rawName = params.fileName || 'terreno';
+  const cleanName = rawName.replace(/\.[^/.]+$/, '');
+  const blob = new Blob([dxf], { type: 'application/dxf' });
+  triggerBrowserDownload(blob, `isolineas_${cleanName}.dxf`);
+}
+
+/**
  * Exports the complete 3D scene as a ZIP containing .OBJ + .MTL + Texture JPG for SketchUp/Rhino/CAD.
  */
 export async function exportToObjZip(options: Export3DOptions) {
@@ -291,6 +580,14 @@ export async function exportToObjZip(options: Export3DOptions) {
     ``,
   ].join('\n');
 
+  // Compute or reuse georeferenced Worldfile
+  const effectiveWorldFile = worldFile || (meshData.bbox ? generateWorldFileForCrs({
+    bbox: meshData.bbox,
+    width: meshData.cols || 150,
+    height: meshData.rows || 150,
+    crsCode: options.crs || 'EPSG:32719',
+  }) : undefined);
+
   const readmeString = [
     `========================================================================`,
     `  GEO·ARC - MODELO 3D DE TERRENO Y CONTEXTO SATELITAL`,
@@ -300,7 +597,7 @@ export async function exportToObjZip(options: Export3DOptions) {
     `- ${fileName}.obj          : Malla 3D del relieve y volúmenes de contexto en metros.`,
     `- ${fileName}.mtl          : Definición de materiales con proyección UV.`,
     `- ${textureFileName}    : Ortofoto satelital de alta resolución capturada.`,
-    worldFile ? `- ${fileName}.jgw          : Archivo de georreferenciación Worldfile para QGIS/AutoCAD.` : '',
+    effectiveWorldFile ? `- ${fileName}.jgw          : Archivo de georreferenciación Worldfile para QGIS/AutoCAD.` : '',
     ``,
     `CÓMO ABRIR EN RHINOCEROS / BLENDER / AUTOCAD / REVIT / 3DS MAX:`,
     `- Rhinoceros: File -> Import -> '${fileName}.obj'`,
@@ -341,8 +638,8 @@ export async function exportToObjZip(options: Export3DOptions) {
   if (imageU8Array) {
     zipEntries[textureFileName] = imageU8Array;
   }
-  if (worldFile) {
-    zipEntries[`${fileName}.jgw`] = fflate.strToU8(worldFile);
+  if (effectiveWorldFile) {
+    zipEntries[`${fileName}.jgw`] = fflate.strToU8(effectiveWorldFile);
   }
 
   const zipBytes = fflate.zipSync(zipEntries);

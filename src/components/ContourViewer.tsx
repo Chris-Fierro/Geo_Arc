@@ -13,10 +13,12 @@ import {
   clampLotDragOffset,
   translateLotPolygon,
 } from '../lib/ogucService';
+import { exportToDxf } from '../lib/exportService';
 
 interface ContourViewerProps {
   interval: number;
   fileName: string;
+  crs?: string;
   meshData?: MeshData;
   zExaggeration?: number;
   colorPalette?: 'termico' | 'tecnico' | 'hipso';
@@ -46,7 +48,7 @@ interface ContourViewerProps {
 }
 
 export default function ContourViewer({
-  interval, fileName, meshData, zExaggeration = 1.0,
+  interval, fileName, crs = 'EPSG:32719', meshData, zExaggeration = 1.0,
   colorPalette = 'tecnico', minVisibleElev, maxVisibleElev, masterIntervalCount = 5,
   showContourLabels = true,
   analysisMode = 'topographic', locationLat = -38.7359, locationLon = -72.5904,
@@ -1012,103 +1014,15 @@ export default function ContourViewer({
   };
 
   const handleExportDXF = () => {
-    if (!contours) return;
-
-    // AutoCAD DXF Header: specifies AC1015 (AutoCAD 2000), INSUNITS 6 (Meters), MEASUREMENT 1 (Metric)
-    const headerLines = [
-      "0", "SECTION",
-      "2", "HEADER",
-      "9", "$ACADVER",
-      "1", "AC1015",
-      "9", "$HANDSEED",
-      "5", "FFFF",
-      "9", "$MEASUREMENT",
-      "70", "1", // 1 = Metric
-      "9", "$INSUNITS",
-      "70", "6", // 6 = Meters (0=Unitless, 1=Inches, 2=Feet, 4=mm, 5=cm, 6=Meters)
-      "9", "$LUNITS",
-      "70", "2", // 2 = Decimal
-      "0", "ENDSEC",
-      "0", "SECTION",
-      "2", "ENTITIES\n"
-    ];
-
-    let dxf = headerLines.join("\n");
-
-    contours.forEach(c => {
-      const z = c.value;
-      const lines = c.type === 'MultiLineString' ? c.coordinates : (c.coordinates as any).flat();
-
-      lines.forEach((line: any) => {
-        dxf += "0\nPOLYLINE\n8\nContours\n66\n1\n70\n8\n10\n0.0\n20\n0.0\n30\n" + z.toFixed(3) + "\n";
-        line.forEach((pt: number[]) => {
-          let realX = pt[0];
-          let realY = pt[1];
-
-          if (meshData && n > 0 && m > 0) {
-            realX = (pt[0] / n) * meshData.w;
-            realY = (1.0 - (pt[1] / m)) * meshData.h;
-          }
-
-          dxf += "0\nVERTEX\n8\nContours\n70\n32\n10\n" + realX.toFixed(3) + "\n20\n" + realY.toFixed(3) + "\n30\n" + z.toFixed(3) + "\n";
-        });
-        dxf += "0\nSEQEND\n";
-      });
+    if (!contours || !meshData) return;
+    exportToDxf({
+      meshData,
+      contours,
+      crs,
+      layerVisibility,
+      customLotPts,
+      fileName,
     });
-
-    if (meshData?.buildings && meshData.bbox) {
-      const els = meshData.buildings.elements || [];
-      const { minLon, maxLon, minLat, maxLat } = meshData.bbox;
-      const widthSpan = maxLon - minLon;
-      const heightSpan = maxLat - minLat;
-
-      const getElevAt = (lon: number, lat: number) => {
-        const gx = Math.floor(((lon - minLon) / widthSpan) * (meshData.cols || n));
-        const gy = Math.floor(((maxLat - lat) / heightSpan) * (meshData.rows || m));
-        const gIdx = Math.max(0, Math.min((meshData.rows || m) - 1, gy)) * (meshData.cols || n) + Math.max(0, Math.min((meshData.cols || n) - 1, gx));
-        const gridVal = meshData.grid[gIdx];
-        return gridVal !== undefined && !Number.isNaN(gridVal) ? gridVal : meshData.minEv;
-      };
-
-      els.forEach((el: any) => {
-        if (el.type === 'way' && el.geometry && el.geometry.length > 0) {
-          const isBuilding = !!el.tags?.building;
-          const isHighway = !!el.tags?.highway;
-          const isWaterway = !!el.tags?.waterway;
-
-          if (!isBuilding && !isHighway && !isWaterway) return;
-
-          let layerName = "Buildings";
-          if (isHighway) layerName = "Highways";
-          if (isWaterway) layerName = "Waterways";
-
-          const polylineFlag = isBuilding ? "9" : "8"; // 9: closed polyline, 8: 3D polyline
-
-          dxf += "0\nPOLYLINE\n8\n" + layerName + "\n66\n1\n70\n" + polylineFlag + "\n10\n0.0\n20\n0.0\n30\n0.0\n";
-          el.geometry.forEach((pt: any) => {
-            const clampedLon = Math.max(minLon, Math.min(maxLon, pt.lon));
-            const clampedLat = Math.max(minLat, Math.min(maxLat, pt.lat));
-            const x = ((clampedLon - minLon) / widthSpan) * meshData.w;
-            const y = ((clampedLat - minLat) / heightSpan) * meshData.h; // True Y Cartesian mapping vs SVG
-            const z = getElevAt(clampedLon, clampedLat);
-            dxf += "0\nVERTEX\n8\n" + layerName + "\n70\n32\n10\n" + x.toFixed(3) + "\n20\n" + y.toFixed(3) + "\n30\n" + z.toFixed(3) + "\n";
-          });
-          dxf += "0\nSEQEND\n";
-        }
-      });
-    }
-
-    dxf += "0\nENDSEC\n0\nEOF\n";
-
-    const blob = new Blob([dxf], { type: 'application/dxf' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `isolineas_${fileName.replace(/\.[^/.]+$/, "")}.dxf`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
   };
 
   const buildThreeScene = (THREE: any) => {
