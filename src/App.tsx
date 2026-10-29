@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Upload, Download, Settings2,
@@ -8,11 +8,12 @@ import {
 } from 'lucide-react';
 import ContourViewer from './components/ContourViewer';
 import ThreeTerrainViewer from './components/ThreeTerrainViewer';
-import { MeshData } from './lib/meshProcessor';
+import { MeshData, processMeshFile } from './lib/meshProcessor';
 import OsmImporter from './components/OsmImporter';
 import { getSunPosition, parseLocalSolarDate } from './lib/SunPosition';
-import { exportToObjZip, exportToGlb, triggerBrowserDownload } from './lib/exportService';
+import { exportToObjZip, exportToGlb, exportToSvg, triggerBrowserDownload } from './lib/exportService';
 import { fetchOsmLayersForBBox } from './lib/ogucService';
+import { SUPPORTED_CRS } from './lib/crsService';
 
 function InfoTooltip({ text }: { text: string }) {
   const [show, setShow] = useState(false);
@@ -42,7 +43,14 @@ export type AnalysisMode = 'topographic' | 'oguc' | 'solar';
 export default function App() {
   const [interval, setInterval] = useState<number>(1.0);
   const [zExaggeration, setZExaggeration] = useState<number>(1.5);
-  const [crs, setCrs] = useState<string>('EPSG:32633');
+  const [crs, setCrs] = useState<string>('EPSG:32719');
+
+  // Local 3D Mesh state
+  const [terrainSourceTab, setTerrainSourceTab] = useState<'osm' | 'mesh'>('osm');
+  const [isMeshUploading, setIsMeshUploading] = useState<boolean>(false);
+  const [meshUploadError, setMeshUploadError] = useState<string | null>(null);
+  const [isLocalMeshActive, setIsLocalMeshActive] = useState<boolean>(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   
   // Controles topográficos didácticos
   const [minElevation, setMinElevation] = useState<number | ''>('');
@@ -325,6 +333,7 @@ export default function App() {
     }
 
     setIsDone(true);
+    setIsLocalMeshActive(false);
   };
 
   const handleExportGeoarc = () => {
@@ -505,6 +514,83 @@ export default function App() {
     }
   };
 
+  const handleMeshUpload = async (file: File) => {
+    if (!file) return;
+    setMeshUploadError(null);
+    if (file.size > 50 * 1024 * 1024) {
+      setMeshUploadError(
+        'El archivo supera el límite recomendado de 50 MB. Simplifica la densidad de polígonos en Blender o CloudCompare antes de importarlo.'
+      );
+      return;
+    }
+
+    setIsMeshUploading(true);
+    try {
+      const processed = await processMeshFile(file, 150);
+      setMeshData(processed);
+      setFileName(file.name);
+      setIsDone(true);
+      setCustomLotPts(null);
+      setIsLocalMeshActive(true);
+      setViewerMode('technical');
+    } catch (err: any) {
+      console.error('Error al procesar malla 3D local:', err);
+      setMeshUploadError(
+        err?.message ||
+          'El archivo no contiene vértices válidos o el formato no es compatible. Exporta la malla en formato .PLY binario o .FBX estándar con escala métrica e inténtalo nuevamente.'
+      );
+    } finally {
+      setIsMeshUploading(false);
+    }
+  };
+
+  const handleMeshFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      handleMeshUpload(file);
+      e.target.value = '';
+    }
+  };
+
+  const handleMeshFileDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      handleMeshUpload(file);
+    }
+  };
+
+  const handleDiscardMesh = () => {
+    const confirm = window.confirm(
+      'Descartar Malla 3D: ¿Deseas descartar la malla cargada y volver a la selección de terreno por mapa? Se perderán las cotas actuales.'
+    );
+    if (!confirm) return;
+    setMeshData(undefined);
+    setIsDone(false);
+    setIsLocalMeshActive(false);
+    setCustomLotPts(null);
+    setTerrainSourceTab('osm');
+  };
+
+  const handleExportSvgSheet = () => {
+    if (!meshData) return;
+    exportToSvg({
+      meshData,
+      fileName,
+      crs,
+      interval,
+      masterIntervalCount,
+      showContourLabels,
+      customLotPts,
+      layerVisibility: {
+        buildings: showContextBuildings,
+        highways: showHighways,
+        waterways: showWaterways,
+      },
+    });
+  };
+
   return (
     <div className="h-screen w-screen overflow-hidden bg-bg-base text-text-main font-sans flex flex-col transition-colors duration-300">
       {/* Header */}
@@ -567,7 +653,135 @@ export default function App() {
                   </h2>
                 </div>
 
-                <OsmImporter onDataFetched={handleOsmDataFetched} />
+                {/* Segmented Control for Terrain Source */}
+                <div className="flex bg-bg-elevated p-1 rounded-sm border border-border-main mb-3">
+                  <button
+                    onClick={() => setTerrainSourceTab('osm')}
+                    className={`flex-1 text-[9px] uppercase tracking-widest font-bold py-1.5 rounded-sm transition-colors cursor-pointer ${
+                      terrainSourceTab === 'osm'
+                        ? 'bg-bg-surface text-accent shadow-sm'
+                        : 'text-text-faded hover:text-text-main'
+                    }`}
+                  >
+                    Satelital OSM
+                  </button>
+                  <button
+                    onClick={() => setTerrainSourceTab('mesh')}
+                    className={`flex-1 text-[9px] uppercase tracking-widest font-bold py-1.5 rounded-sm transition-colors cursor-pointer ${
+                      terrainSourceTab === 'mesh'
+                        ? 'bg-bg-surface text-accent shadow-sm'
+                        : 'text-text-faded hover:text-text-main'
+                    }`}
+                  >
+                    Malla 3D (.PLY / .FBX)
+                  </button>
+                </div>
+
+                {terrainSourceTab === 'osm' ? (
+                  <OsmImporter onDataFetched={handleOsmDataFetched} />
+                ) : (
+                  <div className="space-y-3">
+                    {/* Error Banner */}
+                    {meshUploadError && (
+                      <div className="p-3 rounded-sm bg-red-950/30 border border-red-500/40 text-xs text-red-200 flex flex-col gap-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="leading-relaxed text-[11px]">{meshUploadError}</span>
+                          <button
+                            onClick={() => setMeshUploadError(null)}
+                            className="text-red-400 hover:text-red-100 cursor-pointer font-bold shrink-0"
+                            title="Descartar aviso"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Processing State */}
+                    {isMeshUploading ? (
+                      <div className="flex flex-col items-center justify-center p-6 bg-bg-elevated/40 rounded-sm border border-border-main text-center">
+                        <div className="w-5 h-5 border-2 border-accent border-t-transparent rounded-full animate-spin mb-3"></div>
+                        <p className="text-[10px] font-mono text-accent uppercase tracking-widest">
+                          Procesando geometría 3D y calculando cotas...
+                        </p>
+                      </div>
+                    ) : isLocalMeshActive && meshData ? (
+                      /* Populated Active Mesh Card */
+                      <div className="bg-bg-elevated/60 border border-border-main rounded-sm p-3.5 space-y-3">
+                        <div className="flex items-center justify-between border-b border-border-main pb-2">
+                          <span className="text-xs font-bold text-text-main truncate max-w-[180px]" title={fileName}>
+                            {fileName}
+                          </span>
+                          <span className="text-[9px] font-mono text-green-400 bg-green-950/40 border border-green-500/30 px-1.5 py-0.5 rounded-xs">
+                            ✓ Malla 3D Activa
+                          </span>
+                        </div>
+                        <div className="space-y-1.5 text-[10px] font-mono text-text-faded">
+                          <div className="flex justify-between">
+                            <span>Dimensiones:</span>
+                            <span className="text-text-main">{meshData.w.toFixed(1)}m × {meshData.h.toFixed(1)}m</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Elevación:</span>
+                            <span className="text-text-main">
+                              Min: {meshData.minEv.toFixed(1)}m | Max: {meshData.maxEv.toFixed(1)}m (Δ: {(meshData.maxEv - meshData.minEv).toFixed(1)}m)
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Grilla:</span>
+                            <span className="text-text-main">{meshData.cols || 150} × {meshData.rows || 150} celdas</span>
+                          </div>
+                          {!meshData.bbox && (
+                            <p className="text-[9px] text-text-subtle italic pt-1">
+                              Malla Local sin capas OSM contextuales
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex gap-2 pt-1 border-t border-border-main">
+                          <button
+                            onClick={() => fileInputRef.current?.click()}
+                            className="flex-1 bg-bg-surface border border-border-main hover:border-accent text-[9px] font-bold uppercase tracking-wider py-1.5 px-2 rounded-sm text-text-main transition-colors cursor-pointer text-center"
+                          >
+                            Reemplazar Malla
+                          </button>
+                          <button
+                            onClick={handleDiscardMesh}
+                            className="flex-1 bg-red-950/30 border border-red-800/40 hover:border-red-600 text-[9px] font-bold uppercase tracking-wider py-1.5 px-2 rounded-sm text-red-300 hover:text-red-100 transition-colors cursor-pointer text-center"
+                          >
+                            Descartar Malla
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      /* Idle / Dropzone State */
+                      <div
+                        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                        onDrop={handleMeshFileDrop}
+                        onClick={() => fileInputRef.current?.click()}
+                        className="border-dashed border border-border-strong hover:border-accent bg-bg-elevated/40 p-5 rounded-sm text-center transition-colors cursor-pointer group"
+                      >
+                        <Upload size={20} className="mx-auto text-accent mb-2 group-hover:scale-110 transition-transform" />
+                        <p className="text-xs font-bold text-text-main mb-1">Arrastra tu malla 3D aquí</p>
+                        <p className="text-[10px] text-text-faded leading-relaxed mb-3">
+                          Formatos: .PLY (Point Cloud / Mesh) o .FBX (ASCII / Binary) hasta 50MB
+                        </p>
+                        <button
+                          type="button"
+                          className="bg-bg-surface border border-border-main hover:border-accent text-[10px] font-bold uppercase tracking-wider py-1.5 px-3 rounded-sm text-text-main transition-colors"
+                        >
+                          Seleccionar Archivo Local
+                        </button>
+                      </div>
+                    )}
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".ply,.fbx"
+                      onChange={handleMeshFileInputChange}
+                      className="hidden"
+                    />
+                  </div>
+                )}
               </div>
 
               <div className="bg-bg-surface p-4 rounded-sm border border-border-main transition-colors duration-300">
@@ -690,13 +904,17 @@ export default function App() {
                     <label className="text-[10px] text-text-faded block mb-3 uppercase tracking-wide">
                       Sistema de Referencia (CRS)
                     </label>
-                    <input
-                      type="text"
+                    <select
                       value={crs}
                       onChange={(e) => setCrs(e.target.value)}
-                      className="w-full bg-bg-elevated border border-border-main text-xs p-2.5 rounded-sm outline-none appearance-none text-text-main focus:border-accent transition-colors"
-                      placeholder="Ej. EPSG:32633"
-                    />
+                      className="w-full bg-bg-elevated border border-border-main text-xs p-2.5 rounded-sm outline-none text-text-main focus:border-accent transition-colors cursor-pointer"
+                    >
+                      {Object.values(SUPPORTED_CRS).map((def) => (
+                        <option key={def.code} value={def.code}>
+                          {def.code} — {def.name}
+                        </option>
+                      ))}
+                    </select>
                     <p className="text-[9px] text-text-subtle tracking-widest mt-2 uppercase">Normalización de coordenadas métricas</p>
                   </div>
 
@@ -987,6 +1205,15 @@ export default function App() {
                     <Download size={12} />
                     <span>SketchUp (.GLB)</span>
                   </button>
+                  <button
+                    onClick={handleExportSvgSheet}
+                    disabled={!meshData}
+                    className="px-2.5 py-1 text-[9px] uppercase tracking-wider font-bold border border-border-main hover:border-accent text-text-faded hover:text-accent rounded-sm bg-bg-elevated transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    title="Descargar lámina topográfica vectorial en formato SVG con curvas de nivel y capas activas"
+                  >
+                    <Download size={12} />
+                    <span>Lámina (.SVG)</span>
+                  </button>
                   {meshData.satelliteTexture && (
                     <button
                       onClick={handleDownloadOrthophoto}
@@ -1004,9 +1231,12 @@ export default function App() {
             {/* Content Area */}
             <div className="flex-1 relative z-10 overflow-hidden w-full h-full flex flex-col p-0">
               {(!isDone && !isProcessing) ? (
-                <div className="h-full flex flex-col items-center justify-center text-text-subtle">
-                  <MapIcon size={32} className="mb-4 opacity-50" />
-                  <p className="text-[10px] uppercase tracking-widest font-mono">En espera de extracción e inicio</p>
+                <div className="h-full flex flex-col items-center justify-center text-text-subtle p-6 text-center max-w-md mx-auto">
+                  <MapIcon size={36} className="mb-3 opacity-40 text-accent" />
+                  <h3 className="text-sm font-bold text-text-main mb-1">Ningún terreno seleccionado</h3>
+                  <p className="text-xs text-text-faded leading-relaxed">
+                    Delimita un área predial en el mapa satelital OSM o carga una malla 3D local (.PLY / .FBX) para visualizar curvas de nivel y normativa.
+                  </p>
                 </div>
               ) : isProcessing ? (
                 <div className="h-full flex flex-col items-center justify-center">

@@ -13,7 +13,7 @@ import {
   clampLotDragOffset,
   translateLotPolygon,
 } from '../lib/ogucService';
-import { exportToDxf, exportToStl } from '../lib/exportService';
+import { exportToDxf, exportToStl, exportToSvg } from '../lib/exportService';
 
 interface ContourViewerProps {
   interval: number;
@@ -1034,6 +1034,22 @@ export default function ContourViewer({
     });
   };
 
+  const handleExportSVG = () => {
+    if (!meshData) return;
+    exportToSvg({
+      meshData,
+      contours,
+      fileName,
+      crs,
+      interval,
+      masterIntervalCount,
+      showContourLabels,
+      customLotPts,
+      layerVisibility,
+    });
+  };
+
+
 
   return (
     <div className="w-full h-full flex items-center justify-center bg-bg-input relative overflow-hidden rounded-sm border border-border-faded transition-colors duration-300">
@@ -1111,6 +1127,16 @@ export default function ContourViewer({
           <button onClick={handleExportSTL} className="py-2 text-text-faded hover:text-accent transition-colors flex flex-col items-center justify-center gap-1" title="Exportar Malla Sólida (STL)">
             <Download size={14} />
             <span className="text-[8px] font-bold tracking-widest uppercase">STL</span>
+          </button>
+          <div className="w-full h-[1px] bg-border-main"></div>
+          <button
+            onClick={handleExportSVG}
+            className="py-2 text-text-faded hover:text-accent transition-colors flex flex-col items-center justify-center gap-1 cursor-pointer"
+            title="Descargar Lámina Topográfica Vectorial (.SVG) con curvas de nivel, cotas métricas y capas activas"
+            aria-label="Descargar Lámina Topográfica Vectorial en formato SVG"
+          >
+            <Download size={14} />
+            <span className="text-[8px] font-bold tracking-widest uppercase">SVG</span>
           </button>
         </div>
       </div>

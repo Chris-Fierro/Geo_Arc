@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OBJExporter, GLTFExporter, STLExporter } from 'three-stdlib';
 import * as fflate from 'fflate';
+import * as d3 from 'd3';
 import type { MeshData } from './meshProcessor';
 import { clipWayToBBox } from './ogucService';
 import { projectPointToCrs, generateWorldFileForCrs } from './crsService';
@@ -21,6 +22,18 @@ export interface DxfExportParams {
   crs?: string;
   layerVisibility?: { buildings?: boolean; highways?: boolean; waterways?: boolean };
   customLotPts?: { x: number; y: number; elev: number }[] | null;
+}
+
+export interface SvgExportParams {
+  meshData: MeshData;
+  contours?: any[];
+  fileName?: string;
+  crs?: string;
+  interval?: number;
+  masterIntervalCount?: number;
+  showContourLabels?: boolean;
+  customLotPts?: { x: number; y: number; elev: number }[] | null;
+  layerVisibility?: { buildings?: boolean; highways?: boolean; waterways?: boolean };
 }
 
 export interface ThreeSceneBuildOptions {
@@ -574,6 +587,229 @@ export function exportToDxf(params: DxfExportParams & { fileName?: string }): vo
   const blob = new Blob([dxf], { type: 'application/dxf' });
   triggerBrowserDownload(blob, `isolineas_${cleanName}.dxf`);
 }
+
+/**
+ * Generates a clean, structured SVG topographic vector sheet with technical metadata,
+ * hypsometric isolines, labeled master contours, lot boundaries, and urban context.
+ */
+export function generateSvgTopographicSheet(params: SvgExportParams): string {
+  const {
+    meshData,
+    fileName = 'terreno',
+    crs = 'EPSG:32719',
+    interval = 1.0,
+    masterIntervalCount = 5,
+    showContourLabels = true,
+    customLotPts,
+    layerVisibility = { buildings: true, highways: true, waterways: true },
+  } = params;
+
+  const w = meshData.w || 500;
+  const h = meshData.h || 500;
+  const cols = meshData.cols || meshData.size || 150;
+  const rows = meshData.rows || meshData.size || 150;
+  const minEv = meshData.minEv || 0;
+  const maxEv = meshData.maxEv || 10;
+
+  // Sanitize filename for XML comment
+  const cleanName = fileName.replace(/\.[^/.]+$/, '');
+  const escapedFileName = cleanName.replace(/--/g, '__').replace(/[<>&]/g, '');
+
+  const normCols = Math.max(1, cols - 1);
+  const normRows = Math.max(1, rows - 1);
+
+  // Compute or reuse D3 contours
+  let contours = params.contours || [];
+  if (contours.length === 0 && meshData.grid && meshData.grid.length > 0) {
+    const thresholds: number[] = [];
+    const start = Math.ceil(minEv / interval) * interval;
+    for (let v = start; v <= maxEv; v += interval) {
+      thresholds.push(v);
+      if (thresholds.length >= 180) break;
+    }
+    if (thresholds.length === 0) thresholds.push(minEv);
+    contours = d3.contours().size([cols, rows]).thresholds(thresholds)(meshData.grid);
+  }
+
+  const masterStep = interval * masterIntervalCount;
+
+  // 1. Process Contour Lines & Labels
+  const contourPathElements: string[] = [];
+  const labelElements: string[] = [];
+
+  for (const c of contours) {
+    const val = Number(c.value) || 0;
+    const isMaster =
+      masterStep > 0 && Math.abs(Math.round(val / interval) % masterIntervalCount) === 0;
+    const cls = isMaster ? 'contour-major' : 'contour-standard';
+
+    let rawLines: any[] = [];
+    if (c.type === 'LineString') {
+      rawLines = [c.coordinates];
+    } else if (c.type === 'MultiLineString' || c.type === 'Polygon') {
+      rawLines = c.coordinates;
+    } else if (c.type === 'MultiPolygon') {
+      rawLines = c.coordinates.flat(1);
+    } else if (Array.isArray(c.coordinates)) {
+      if (c.coordinates.length > 0 && typeof c.coordinates[0][0] === 'number') {
+        rawLines = [c.coordinates];
+      } else {
+        rawLines = c.coordinates.flat(1);
+      }
+    }
+
+    for (const line of rawLines) {
+      if (!Array.isArray(line) || line.length < 2) continue;
+
+      let d = '';
+      for (let i = 0; i < line.length; i++) {
+        const pt = line[i];
+        const sx = (pt[0] / normCols) * w;
+        const sy = (pt[1] / normRows) * h;
+        d += i === 0 ? `M ${sx.toFixed(2)} ${sy.toFixed(2)}` : ` L ${sx.toFixed(2)} ${sy.toFixed(2)}`;
+      }
+      contourPathElements.push(`    <path class="${cls}" d="${d}" />`);
+
+      if (showContourLabels && isMaster && line.length >= 2) {
+        const midIdx = Math.floor(line.length / 2);
+        const midPt = line[midIdx];
+        const lx = (midPt[0] / normCols) * w;
+        const ly = (midPt[1] / normRows) * h;
+        labelElements.push(
+          `    <text class="contour-label" x="${lx.toFixed(2)}" y="${ly.toFixed(2)}">${val.toFixed(1)}m</text>`
+        );
+      }
+    }
+  }
+
+  // 2. Process Urban Context (Highways, Waterways, Buildings)
+  const urbanElements: string[] = [];
+  if (meshData.buildings?.elements && meshData.bbox) {
+    const { minLon, maxLon, minLat, maxLat } = meshData.bbox;
+    const widthSpan = maxLon - minLon || 1;
+    const heightSpan = maxLat - minLat || 1;
+
+    for (const el of meshData.buildings.elements) {
+      const isHw = !!el.tags?.highway && layerVisibility.highways !== false;
+      const isWw = !!el.tags?.waterway && layerVisibility.waterways !== false;
+
+      if ((isHw || isWw) && Array.isArray(el.geometry) && el.geometry.length >= 2) {
+        const cls = isHw ? 'highway-line' : 'waterway-line';
+        const clipped = clipWayToBBox(el.geometry, meshData.bbox, 15);
+        for (const line of clipped) {
+          if (line.length < 2) continue;
+          let d = '';
+          for (let i = 0; i < line.length; i++) {
+            const pt = line[i];
+            const sx = ((pt.lon - minLon) / widthSpan) * w;
+            const sy = ((maxLat - pt.lat) / heightSpan) * h;
+            d += i === 0 ? `M ${sx.toFixed(2)} ${sy.toFixed(2)}` : ` L ${sx.toFixed(2)} ${sy.toFixed(2)}`;
+          }
+          urbanElements.push(`    <path class="${cls}" d="${d}" />`);
+        }
+      }
+
+      // Buildings
+      if (layerVisibility.buildings !== false && el.tags?.building) {
+        const geometries: { lon: number; lat: number }[][] = [];
+        if (el.type === 'way' && Array.isArray(el.geometry) && el.geometry.length >= 3) {
+          geometries.push(el.geometry);
+        } else if (el.type === 'relation' && Array.isArray(el.members)) {
+          for (const m of el.members) {
+            if (m.role === 'outer' && Array.isArray(m.geometry) && m.geometry.length >= 3) {
+              geometries.push(m.geometry);
+            }
+          }
+        }
+
+        for (const geom of geometries) {
+          let sumLon = 0;
+          let sumLat = 0;
+          for (const pt of geom) {
+            sumLon += pt.lon;
+            sumLat += pt.lat;
+          }
+          const avgLon = sumLon / geom.length;
+          const avgLat = sumLat / geom.length;
+          if (avgLon < minLon || avgLon > maxLon || avgLat < minLat || avgLat > maxLat) continue;
+
+          let ptsStr = '';
+          for (const pt of geom) {
+            const sx = ((pt.lon - minLon) / widthSpan) * w;
+            const sy = ((maxLat - pt.lat) / heightSpan) * h;
+            ptsStr += `${sx.toFixed(2)},${sy.toFixed(2)} `;
+          }
+          urbanElements.push(`    <polygon class="building-footprint" points="${ptsStr.trim()}" />`);
+        }
+      }
+    }
+  }
+
+  // 3. Process Lot Boundary
+  const lotElements: string[] = [];
+  if (customLotPts && customLotPts.length >= 3) {
+    let ptsStr = '';
+    for (const pt of customLotPts) {
+      const sx = (pt.x / normCols) * w;
+      const sy = (pt.y / normRows) * h;
+      ptsStr += `${sx.toFixed(2)},${sy.toFixed(2)} `;
+    }
+    lotElements.push(`    <polygon class="lot-boundary" points="${ptsStr.trim()}" />`);
+  }
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ========================================================================
+  GEO·ARC - LÁMINA TOPOGRÁFICA VECTORIAL (.SVG)
+  ========================================================================
+  Archivo Base: ${escapedFileName}
+  Sistema de Referencia (CRS): ${crs}
+  Dimensiones Métricas: ${w}m x ${h}m
+  Grilla DEM: ${cols} x ${rows}
+  Rango Altimétrico: Min ${minEv.toFixed(2)}m | Max ${maxEv.toFixed(2)}m
+  Intervalo de Curvas: ${interval}m (Maestras cada ${masterStep}m)
+  Fecha de Generación: ${new Date().toISOString()}
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="100%" height="100%">
+  <defs>
+    <style>
+      .contour-standard { stroke: #666666; stroke-width: 0.5px; fill: none; }
+      .contour-major { stroke: #c5a059; stroke-width: 1.2px; fill: none; }
+      .contour-label { font-family: monospace; font-size: 8px; fill: #c5a059; text-anchor: middle; dominant-baseline: central; }
+      .lot-boundary { stroke: #da291c; stroke-width: 2px; stroke-dasharray: 4,4; fill: rgba(218,41,28,0.1); }
+      .building-footprint { stroke: #e0e0e0; stroke-width: 1px; fill: #2a2a2a; }
+      .highway-line { stroke: #475569; stroke-width: 1.5px; fill: none; }
+      .waterway-line { stroke: #0284c7; stroke-width: 1.5px; fill: none; }
+    </style>
+  </defs>
+  <rect width="${w}" height="${h}" fill="#121212" />
+  <g id="urban-context">
+${urbanElements.join('\n')}
+  </g>
+  <g id="contour-lines">
+${contourPathElements.join('\n')}
+  </g>
+  <g id="contour-labels">
+${labelElements.join('\n')}
+  </g>
+  <g id="lot-boundary">
+${lotElements.join('\n')}
+  </g>
+</svg>
+`;
+}
+
+/**
+ * Serializes and triggers browser download of the SVG topographic sheet.
+ */
+export function exportToSvg(params: SvgExportParams & { fileName?: string }): void {
+  const svgString = generateSvgTopographicSheet(params);
+  const rawName = params.fileName || 'terreno';
+  const cleanName = rawName.replace(/\.[^/.]+$/, '');
+  const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+  triggerBrowserDownload(blob, `topografia_${cleanName}.svg`);
+}
+
 
 /**
  * Exports the complete 3D scene as a ZIP containing .OBJ + .MTL + Texture JPG for SketchUp/Rhino/CAD.
