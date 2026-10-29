@@ -16,7 +16,7 @@
     {
       "number": "3",
       "name": "Rendimiento 60 FPS, Memoria WebGL y Persistencia Local",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "4",
@@ -26,8 +26,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (plan phase 3)",
-    "reason": "Phase 3 of 4 — needs a plan"
+    "label": "Advance to the next step (verify)",
+    "reason": "Phase 3 of 4 · ready to verify"
   },
-  "updated_at": "2026-10-29T19:34:01.388Z"
+  "updated_at": "2026-10-29T20:35:03.518Z"
 }
