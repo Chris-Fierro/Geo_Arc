@@ -4,7 +4,8 @@ import {
   Upload, Download, Settings2,
   MapPin, SlidersHorizontal, Beaker, Map as MapIcon,
   Sun, Moon, Globe, Layers, Box, Image as ImageIcon,
-  PanelLeftClose, PanelLeftOpen
+  PanelLeftClose, PanelLeftOpen,
+  RotateCcw, CheckCircle2, AlertTriangle, X
 } from 'lucide-react';
 import ContourViewer from './components/ContourViewer';
 import ThreeTerrainViewer from './components/ThreeTerrainViewer';
@@ -14,6 +15,7 @@ import { getSunPosition, parseLocalSolarDate } from './lib/SunPosition';
 import { exportToObjZip, exportToGlb, exportToSvg, triggerBrowserDownload } from './lib/exportService';
 import { fetchOsmLayersForBBox } from './lib/ogucService';
 import { SUPPORTED_CRS } from './lib/crsService';
+import { saveSession, loadSession, clearSession } from './lib/storageService';
 
 function InfoTooltip({ text }: { text: string }) {
   const [show, setShow] = useState(false);
@@ -60,6 +62,11 @@ export default function App() {
   const [showContourLabels, setShowContourLabels] = useState<boolean>(true);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isDone, setIsDone] = useState(false);
+
+  // Session Persistence State
+  const [showResetConfirm, setShowResetConfirm] = useState<boolean>(false);
+  const [showRestoreToast, setShowRestoreToast] = useState<boolean>(false);
+  const isRestoringSessionRef = useRef<boolean>(true);
 
   // Mode and Location
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>('topographic');
@@ -171,6 +178,144 @@ export default function App() {
       cancelled = true;
     };
   }, [meshData]);
+
+  // Initial mount: restore session from IndexedDB if available
+  useEffect(() => {
+    let cancelled = false;
+
+    async function restore() {
+      try {
+        const session = await loadSession();
+        if (cancelled) return;
+        if (session && session.meshData) {
+          setMeshData(session.meshData);
+          if (session.customLotPts !== undefined) setCustomLotPts(session.customLotPts);
+          if (session.fileName) setFileName(session.fileName);
+          if (session.analysisMode) setAnalysisMode(session.analysisMode as AnalysisMode);
+          if (session.crs) setCrs(session.crs);
+          if (session.location) {
+            setLocationLat(session.location.lat);
+            setLocationLon(session.location.lon);
+          }
+          if (session.interval !== undefined) setInterval(session.interval);
+          if (session.zExaggeration !== undefined) setZExaggeration(session.zExaggeration);
+          if (session.viewerMode) setViewerMode(session.viewerMode as any);
+          if (session.colorPalette) setColorPalette(session.colorPalette as any);
+
+          if (session.ogucParams) {
+            if (session.ogucParams.ogucAngle !== undefined) setOgucAngle(session.ogucParams.ogucAngle);
+            if (session.ogucParams.ogucRegionGroup !== undefined) setOgucRegionGroup(session.ogucParams.ogucRegionGroup);
+            if (session.ogucParams.ogucRasanteStartHeight !== undefined) setOgucRasanteStartHeight(session.ogucParams.ogucRasanteStartHeight);
+            if (session.ogucParams.ogucApplyExtraSetback !== undefined) setOgucApplyExtraSetback(session.ogucParams.ogucApplyExtraSetback);
+            if (session.ogucParams.ogucContinuousBaseHeight !== undefined) setOgucContinuousBaseHeight(session.ogucParams.ogucContinuousBaseHeight);
+            if (session.ogucParams.ogucMaxHeight !== undefined) setOgucMaxHeight(session.ogucParams.ogucMaxHeight);
+            if (session.ogucParams.ogucMinSetback !== undefined) setOgucMinSetback(session.ogucParams.ogucMinSetback);
+            if (session.ogucParams.showOgucShadows !== undefined) setShowOgucShadows(session.ogucParams.showOgucShadows);
+          }
+
+          if (session.solarParams) {
+            if (session.solarParams.solarDate !== undefined) setSolarDate(session.solarParams.solarDate);
+            if (session.solarParams.solarTime !== undefined) setSolarTime(session.solarParams.solarTime);
+            if (session.solarParams.solarDayPreset !== undefined) setSolarDayPreset(session.solarParams.solarDayPreset);
+            if (session.solarParams.showSunPath !== undefined) setShowSunPath(session.solarParams.showSunPath);
+            if (session.solarParams.showSolarShadows !== undefined) setShowSolarShadows(session.solarParams.showSolarShadows);
+          }
+
+          setIsDone(true);
+          setShowRestoreToast(true);
+          setTimeout(() => {
+            if (!cancelled) setShowRestoreToast(false);
+          }, 4000);
+        }
+      } catch (err) {
+        console.warn('[App] Error restaurando sesión desde IndexedDB:', err);
+      } finally {
+        if (!cancelled) {
+          isRestoringSessionRef.current = false;
+        }
+      }
+    }
+
+    restore();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Reactive auto-save to IndexedDB with 500ms debounce
+  useEffect(() => {
+    if (isRestoringSessionRef.current || !meshData) return;
+
+    const timer = setTimeout(() => {
+      saveSession({
+        version: 1,
+        timestamp: Date.now(),
+        fileName,
+        meshData,
+        customLotPts,
+        analysisMode,
+        crs,
+        interval,
+        zExaggeration,
+        location: { lat: locationLat, lon: locationLon },
+        viewerMode,
+        colorPalette,
+        ogucParams: {
+          ogucAngle,
+          ogucRegionGroup,
+          ogucRasanteStartHeight,
+          ogucApplyExtraSetback,
+          ogucContinuousBaseHeight,
+          ogucMaxHeight,
+          ogucMinSetback,
+          showOgucShadows
+        },
+        solarParams: {
+          solarDate,
+          solarTime,
+          solarDayPreset,
+          showSunPath,
+          showSolarShadows
+        }
+      });
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [
+    meshData, customLotPts, analysisMode, crs, fileName, interval, zExaggeration,
+    locationLat, locationLon, viewerMode, colorPalette,
+    ogucAngle, ogucRegionGroup, ogucRasanteStartHeight, ogucApplyExtraSetback,
+    ogucContinuousBaseHeight, ogucMaxHeight, ogucMinSetback, showOgucShadows,
+    solarDate, solarTime, solarDayPreset, showSunPath, showSolarShadows
+  ]);
+
+  const handleResetConfirm = async () => {
+    try {
+      await clearSession();
+    } catch (err) {
+      console.warn('[App] Error al limpiar sesión en IndexedDB:', err);
+    }
+    setMeshData(undefined);
+    setCustomLotPts(null);
+    setFileName('terreno_osm.json');
+    setIsDone(false);
+    setIsLocalMeshActive(false);
+    setOgucAngle(70);
+    setOgucRegionGroup(3);
+    setOgucRasanteStartHeight(2.5);
+    setOgucApplyExtraSetback(false);
+    setOgucContinuousBaseHeight(0);
+    setOgucMaxHeight(14);
+    setOgucMinSetback(3);
+    setShowOgucShadows(true);
+    setSolarDate('2024-06-21');
+    setSolarTime(12);
+    setSolarDayPreset('solstice_winter');
+    setShowSunPath(true);
+    setShowSolarShadows(true);
+    setShowResetConfirm(false);
+  };
 
   const handleSimulateProcess = async () => {
     setIsProcessing(true);
@@ -612,6 +757,15 @@ export default function App() {
             </p>
           </div>
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => setShowResetConfirm(true)}
+              className="flex items-center gap-2 text-[10px] uppercase font-bold tracking-widest text-text-faded hover:text-accent transition-colors border border-border-main hover:border-accent bg-bg-surface px-3 py-1.5 rounded-sm cursor-pointer"
+              title="Restablecer proyecto y limpiar almacenamiento local IndexedDB"
+              aria-label="Restablecer sesión activa y comenzar nuevo proyecto"
+            >
+              <RotateCcw size={13} />
+              <span>Nueva Sesión</span>
+            </button>
             <button onClick={handleExportGeoarc} className="flex items-center gap-2 text-[10px] uppercase font-bold tracking-widest text-text-faded hover:text-accent transition-colors border border-border-main hover:border-accent bg-bg-surface px-3 py-1.5 rounded-sm cursor-pointer" title="Exportar Escena (.geoarc)">
                <Download size={13} /> Exportar
             </button>
@@ -1340,6 +1494,77 @@ export default function App() {
         </section>
 
       </main>
+
+      {/* Toast de Notificación de Sesión Restaurada */}
+      {showRestoreToast && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed top-14 right-4 z-50 flex items-start gap-3 p-3.5 bg-bg-surface/95 backdrop-blur-sm border border-green-500/30 rounded-sm shadow-xl max-w-sm animate-in fade-in slide-in-from-top-2 duration-300"
+        >
+          <CheckCircle2 size={16} className="text-green-400 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <h4 className="text-xs font-bold text-text-main leading-tight">
+              Sesión de trabajo restaurada
+            </h4>
+            <p className="text-[10px] text-text-faded leading-normal mt-1">
+              Se recuperó el terreno y los parámetros previos desde el almacenamiento local IndexedDB.
+            </p>
+          </div>
+          <button
+            onClick={() => setShowRestoreToast(false)}
+            className="text-text-subtle hover:text-text-main cursor-pointer p-0.5 rounded-xs transition-colors shrink-0"
+            title="Cerrar notificación"
+            aria-label="Cerrar Notificación"
+          >
+            <X size={13} />
+          </button>
+        </div>
+      )}
+
+      {/* Modal de Confirmación de Restablecer Sesión */}
+      {showResetConfirm && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="reset-modal-title"
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-200"
+          onClick={() => setShowResetConfirm(false)}
+          onKeyDown={(e) => { if (e.key === 'Escape') setShowResetConfirm(false); }}
+          tabIndex={-1}
+        >
+          <div
+            className="bg-bg-surface border border-border-strong rounded-sm p-6 max-w-md w-full shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <AlertTriangle size={20} className="text-accent shrink-0" />
+              <h3 id="reset-modal-title" className="text-sm font-bold text-text-main">
+                Restablecer Sesión de Trabajo
+              </h3>
+            </div>
+            <p className="text-xs text-text-muted leading-relaxed">
+              ¿Deseas restablecer la sesión activa? Se eliminarán los datos temporales del terreno, cotas y polígonos almacenados en IndexedDB y se reiniciará el visor al estado base. Los archivos ya exportados (.geoarc, .DXF, .SVG) no se verán afectados.
+            </p>
+            <div className="flex items-center justify-end gap-3 pt-2 border-t border-border-main">
+              <button
+                type="button"
+                onClick={() => setShowResetConfirm(false)}
+                className="border border-border-main hover:border-border-strong bg-bg-elevated px-4 py-2 rounded-sm text-xs font-semibold text-text-main cursor-pointer transition-colors"
+              >
+                Conservar Sesión Actual
+              </button>
+              <button
+                type="button"
+                onClick={handleResetConfirm}
+                className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-sm text-xs font-bold uppercase tracking-wider cursor-pointer transition-colors shadow-sm"
+              >
+                Confirmar Restablecimiento
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
