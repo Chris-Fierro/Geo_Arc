@@ -1,9 +1,11 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig, loadEnv} from 'vite';
+import {defineConfig} from 'vite';
 
 function overpassProxyPlugin() {
+  const MAX_BODY_SIZE = 64 * 1024;
+
   return {
     name: 'overpass-proxy',
     configureServer(server: any) {
@@ -13,11 +15,29 @@ function overpassProxyPlugin() {
         }
 
         let body = '';
+        let bodyLength = 0;
+        let isOverLimit = false;
+
         req.on('data', (chunk: any) => {
+          if (isOverLimit) return;
+          bodyLength += chunk.length;
+          if (bodyLength > MAX_BODY_SIZE) {
+            isOverLimit = true;
+            res.statusCode = 413;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(
+              JSON.stringify({
+                error: 'Payload Too Large: La consulta Overpass excede el límite máximo permitido de 64 KB.',
+              })
+            );
+            req.destroy();
+            return;
+          }
           body += chunk.toString();
         });
 
         req.on('end', async () => {
+          if (isOverLimit) return;
           try {
             let query = body;
             if (body.startsWith('data=')) {
@@ -44,8 +64,7 @@ function overpassProxyPlugin() {
                   method: 'POST',
                   headers: {
                     'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                    'User-Agent':
-                      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                    'User-Agent': 'GeoArc/1.4 (Architectural SIG Assistant)',
                     Referer: 'https://overpass-turbo.eu/',
                     Origin: 'https://overpass-turbo.eu',
                     Accept:
@@ -103,13 +122,9 @@ function overpassProxyPlugin() {
   };
 }
 
-export default defineConfig(({mode}) => {
-  const env = loadEnv(mode, '.', '');
+export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss(), overpassProxyPlugin()],
-    define: {
-      'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
-    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
