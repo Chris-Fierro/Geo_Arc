@@ -16,6 +16,7 @@ import { exportToObjZip, exportToGlb, exportToSvg, triggerBrowserDownload } from
 import { fetchOsmLayersForBBox } from './lib/ogucService';
 import { SUPPORTED_CRS } from './lib/crsService';
 import { saveSession, loadSession, clearSession } from './lib/storageService';
+import { validateGeoarcPayload } from './lib/geoarcValidator';
 
 function InfoTooltip({ text }: { text: string }) {
   const [show, setShow] = useState(false);
@@ -471,6 +472,13 @@ export default function App() {
           const content = ev.target?.result as string;
           const state = JSON.parse(content);
           
+          const validation = validateGeoarcPayload(state);
+          if (!validation.valid) {
+            alert('Archivo .geoarc inválido o corrupto: ' + (validation.error || 'Estructura no válida'));
+            e.target.value = '';
+            return;
+          }
+
           if (state.topographic) {
             if (state.topographic.interval !== undefined) setInterval(state.topographic.interval);
             if (state.topographic.zExaggeration !== undefined) setZExaggeration(state.topographic.zExaggeration);
