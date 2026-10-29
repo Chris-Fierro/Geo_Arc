@@ -22,8 +22,8 @@
 ### Rendimiento, Memoria WebGL y Persistencia (`PERF`)
 
 - [ ] **PERF-01**: El usuario conserva automáticamente su sesión de trabajo activa (terreno `meshData`, polígono de lote `customLotPts` y parámetros OGUC/Solar) en almacenamiento local (`IndexedDB`) al recargar el navegador (`F5`), con control para restablecer la sesión.
-- [ ] **PERF-02**: El usuario puede rotar y orbitar la vista 2.5D (`ContourViewer`) en Modo Solar a 60 FPS gracias a la memoización (`useMemo`) de los polígonos de sombra calculados por raymarching (`getSolarShadowPolygon`).
-- [ ] **PERF-03**: El usuario puede deslizar la hora solar y modificar parámetros OGUC continuamente en la vista 3D (`ThreeTerrainViewer`) sin fugas de memoria en la GPU gracias a la liberación recursiva (`dispose()`) de geometrías, materiales y texturas al actualizar grupos de escena.
+- [x] **PERF-02**: El usuario puede rotar y orbitar la vista 2.5D (`ContourViewer`) en Modo Solar a 60 FPS gracias a la memoización (`useMemo`) de los polígonos de sombra calculados por raymarching (`getSolarShadowPolygon`).
+- [x] **PERF-03**: El usuario puede deslizar la hora solar y modificar parámetros OGUC continuamente en la vista 3D (`ThreeTerrainViewer`) sin fugas de memoria en la GPU gracias a la liberación recursiva (`dispose()`) de geometrías, materiales y texturas al actualizar grupos de escena.
 - [ ] **PERF-04**: El usuario extrae terrenos sin doble interpolación redundante `150x150` entre `OsmImporter.tsx` y `App.tsx`, y opera una barra lateral libre del botón simulado sin efecto (`"Generar Visualización 3D"` / `handleSimulateProcess`).
 
 ### Calidad, Arquitectura, Seguridad y Tests (`QUAL`)
@@ -61,8 +61,8 @@
 | CAD-04 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Complete |
 | QUAL-02 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Complete |
 | PERF-01 | Phase 3: Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | Pending |
-| PERF-02 | Phase 3: Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | Pending |
-| PERF-03 | Phase 3: Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | Pending |
+| PERF-02 | Phase 3: Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | Complete |
+| PERF-03 | Phase 3: Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | Complete |
 | PERF-04 | Phase 3: Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | Pending |
 | QUAL-01 | Phase 4: Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura | Pending |
 | QUAL-03 | Phase 4: Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura | Pending |

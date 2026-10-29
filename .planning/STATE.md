@@ -4,17 +4,16 @@ milestone: v1.4
 current_phase: 3
 current_phase_name: Rendimiento 60 FPS, Memoria WebGL y Persistencia Local
 status: planning
-stopped_at: Phase 02 complete, ready to plan Phase 3
-last_updated: "2026-10-29T19:34:01.324Z"
+stopped_at: Completed 03-01-PLAN.md
+last_updated: "2026-10-29T20:22:25.519Z"
 last_activity: 2026-10-29
 last_activity_desc: Phase 02 complete, transitioned to Phase 3
-state_head: 19c4850fa9c3ac6e57acbb61c7a97d342dfa3f27
+state_head: 5d19abce3b33e93efae077334d23cab6e20c2e5a
 progress:
   total_phases: 4
   completed_phases: 2
-  total_plans: 4
-  completed_plans: 4
-  percent: 50
+  total_plans: 6
+  completed_plans: 5
 ---
 
 # Project State
@@ -29,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-10-28)
 ## Current Position
 
 Phase: 3 — Rendimiento 60 FPS, Memoria WebGL y Persistencia Local
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-10-29 — Phase 02 complete, transitioned to Phase 3
+Current Plan: 2 of 2
+Status: executing
+Last activity: 2026-10-29 — Completed 03-01-PLAN.md
 
 Progress: [█████░░░░░] 50% (Phase 1 & 2 complete)
 
@@ -66,6 +65,7 @@ Progress: [█████░░░░░] 50% (Phase 1 & 2 complete)
 | Phase 01 P02 | 8min | 2 tasks | 3 files |
 | Phase 02 P01 | 12min | 2 tasks | 4 files |
 | Phase 02 P02 | 18min | 2 tasks | 4 files |
+| Phase 03 P01 | 8min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -88,6 +88,8 @@ Recent decisions affecting current work:
 - [Phase 01]: Proyección de sombra propuesta OGUC multinivel (projectMultiTierDirectionalShadowOnTerrain) aterrizando cada tier a la cota real del terreno (getGridElevAt)
 - [Phase 01]: D-04: getSolarTimezoneOffset dinamico con soporte DST chileno (America/Santiago UTC-3/UTC-4) y Magallanes (UTC-3 permanente), y parseLocalSolarDate a mediodia local
 - [Phase 01]: D-02: Arrastre rigido de lote en ContourViewer.tsx con clampLotDragOffset, desacople con latestDragOffsetRef y commit a customLotPts con remuestreo de elevacion en pointerup
+- [Phase 03]: D-02: Raymarching de sombras solares desacoplado del bucle SVG mediante hooks useMemo en ContourViewer, garantizando 60 FPS fluidos en órbita y rotación
+- [Phase 03]: D-03: Implementación y exportación de disposeObjectTree para liberación recursiva de geometrías, materiales y texturas WebGL antes de scene.remove y en el desmontaje
 
 ### Pending Todos
 
@@ -107,6 +109,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-29T01:29:05.805Z
-Stopped at: Phase 02 complete, ready to plan Phase 3
+Last session: 2026-10-29T20:22:25.142Z
+Stopped at: Completed 03-01-PLAN.md
 Resume file: None
