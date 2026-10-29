@@ -15,9 +15,9 @@
 ### Interoperabilidad CAD / GIS / 3D (`CAD`)
 
 - [x] **CAD-01**: El usuario puede exportar archivos `.DXF` donde las vías y cuerpos de agua se recortan limpiamente al BBox (`clipWayToBBox`), se incluyen edificios multipolígono (`type === 'relation'`) y las elevaciones Z se muestrean mediante interpolación bilineal.
-- [ ] **CAD-02**: El usuario puede exportar mallas `.STL` cuya geometría de terreno y edificios (normalización de cota Z relativa a `minEv` y empotramiento de `0.35m` en pendiente) es idéntica a la generada para `.GLB`, `.OBJ` y el visor 3D.
+- [x] **CAD-02**: El usuario puede exportar mallas `.STL` cuya geometría de terreno y edificios (normalización de cota Z relativa a `minEv` y empotramiento de `0.35m` en pendiente) es idéntica a la generada para `.GLB`, `.OBJ` y el visor 3D.
 - [x] **CAD-03**: El usuario puede seleccionar un Sistema de Referencia (`CRS`: `EPSG:32718` UTM 18S, `EPSG:32719` UTM 19S, `EPSG:32633` o `EPSG:4326`) y obtener coordenadas reproyectadas reales tanto en la exportación `.DXF` como en el archivo Worldfile `.JGW`.
-- [ ] **CAD-04**: El usuario puede importar archivos locales de malla 3D (`.PLY` y `.FBX` mediante `processMeshFile`) desde la barra lateral y exportar directamente la lámina vectorial topográfica en formato `.SVG` (`topografia_*.svg`).
+- [x] **CAD-04**: El usuario puede importar archivos locales de malla 3D (`.PLY` y `.FBX` mediante `processMeshFile`) desde la barra lateral y exportar directamente la lámina vectorial topográfica en formato `.SVG` (`topografia_*.svg`).
 
 ### Rendimiento, Memoria WebGL y Persistencia (`PERF`)
 
@@ -29,7 +29,7 @@
 ### Calidad, Arquitectura, Seguridad y Tests (`QUAL`)
 
 - [ ] **QUAL-01**: El repositorio cuenta con `Vitest` configurado y una suite de pruebas automatizadas que valida el motor OGUC (`ogucService.ts`), el motor solar (`SunPosition.ts`), el cálculo de métricas de polígonos, las conversiones CRS/UTM y los constructores de exportación.
-- [ ] **QUAL-02**: La construcción de geometrías Three.js (terreno y extrusión de edificios con empotramiento en pendiente) está unificada en un módulo compartido consumido por `ThreeTerrainViewer.tsx` y todas las exportaciones 3D (`.GLB`, `.OBJ`, `.STL`).
+- [x] **QUAL-02**: La construcción de geometrías Three.js (terreno y extrusión de edificios con empotramiento en pendiente) está unificada en un módulo compartido consumido por `ThreeTerrainViewer.tsx` y todas las exportaciones 3D (`.GLB`, `.OBJ`, `.STL`).
 - [ ] **QUAL-03**: La carga de archivos `.geoarc` valida el esquema e integridad de `meshData` y `satelliteTexture`, el proxy `/api/overpass` (`vite.config.ts`) impone límite de payload (`64 KB`) y cabeceras limpias, se remueve la inyección de `GEMINI_API_KEY` en el cliente y se depuran paquetes no usados y scripts en `package.json`.
 
 ## v2 Requirements (Deferred)
@@ -56,10 +56,10 @@
 | OGUC-03 | Phase 1: Precisión Normativa OGUC y Motor Solar | Complete |
 | OGUC-04 | Phase 1: Precisión Normativa OGUC y Motor Solar | Complete |
 | CAD-01 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Complete |
-| CAD-02 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Pending |
+| CAD-02 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Complete |
 | CAD-03 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Complete |
-| CAD-04 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Pending |
-| QUAL-02 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Pending |
+| CAD-04 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Complete |
+| QUAL-02 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Complete |
 | PERF-01 | Phase 3: Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | Pending |
 | PERF-02 | Phase 3: Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | Pending |
 | PERF-03 | Phase 3: Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | Pending |
