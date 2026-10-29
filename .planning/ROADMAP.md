@@ -46,7 +46,7 @@ Plans:
   2. Al exportar un modelo `.STL`, `.GLB` o `.OBJ`, los tres formatos y el visor `3D Satelital` utilizan el mismo constructor unificado de escena Three.js, produciendo idéntica normalización de cota Z respecto a `minEv` y el mismo empotramiento de edificios (`0.35m`) en pendiente.
   3. Al seleccionar un Sistema de Referencia (`EPSG:32718` UTM 18S, `EPSG:32719` UTM 19S, `EPSG:32633` o `EPSG:4326`), tanto el archivo `.DXF` como el Worldfile `.JGW` se exportan con coordenadas reales reproyectadas al CRS elegido.
   4. El usuario dispone en la interfaz de controles activos para importar mallas locales `.PLY` y `.FBX` (convirtiéndolas en terreno editable) y para descargar directamente la lámina vectorial topográfica en formato `.SVG` (`topografia_*.svg`).
-**Plans:** 2 plans
+**Plans:** 2/2 plans complete
 Plans:
 **Wave 1**
 - [x] 02-01-PLAN.md — Servicio de proyección cartográfica Snyder WGS84/UTM (`src/lib/crsService.ts`), Worldfile `.JGW` georreferenciado y serialización `.DXF` con recorte `clipWayToBBox`, edificios `relation` y cota Z bilineal (`CAD-01`, `CAD-03`)
