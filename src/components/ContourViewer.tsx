@@ -90,7 +90,7 @@ export default function ContourViewer({
       };
       animationFrameId = requestAnimationFrame(animate);
     }
-    return () => {
+    return function cleanup() {
       if (animationFrameId) cancelAnimationFrame(animationFrameId);
     };
   }, [isAutoOrbit, isPerspective]);
@@ -343,23 +343,6 @@ export default function ContourViewer({
     }
 
     return { buildings3D: buildings, highways3D: highways, waterways3D: waterways, getElevAt };
-  }, [meshData, n, m]);
-
-  const terrainCurtains = useMemo(() => {
-    if (!meshData) return null;
-    const base = meshData.minEv;
-
-    // Create the 4 curtain paths
-    // Bottom edge (y = m-1)
-    const ptsB = d3.range(0, n, n / 20 || 1).map(x => ({ x, y: m - 1, elev: meshData.grid[(m - 1) * n + Math.floor(x)] || base }));
-    // Top edge (y = 0)
-    const ptsT = d3.range(0, n, n / 20 || 1).map(x => ({ x, y: 0, elev: meshData.grid[Math.floor(x)] || base }));
-    // Left edge (x = 0)
-    const ptsL = d3.range(0, m, m / 20 || 1).map(y => ({ x: 0, y, elev: meshData.grid[Math.floor(y) * n] || base }));
-    // Right edge (x = n-1)
-    const ptsR = d3.range(0, m, m / 20 || 1).map(y => ({ x: n - 1, y, elev: meshData.grid[Math.floor(y) * n + (n - 1)] || base }));
-
-    return { ptsB, ptsT, ptsL, ptsR };
   }, [meshData, n, m]);
 
   const geoPath = d3.geoPath();
@@ -885,6 +868,55 @@ export default function ContourViewer({
     return convexHull3D(allPts);
   };
 
+  // Sombras 3D memoizadas para 60 FPS en rotación y órbita (D-02, PERF-02)
+  const buildingSolarShadows3D = useMemo(() => {
+    if (
+      analysisMode !== 'solar' ||
+      !solarParams?.showShadows ||
+      !layerVisibility.buildings ||
+      !sunPosition ||
+      sunPosition.elevation <= 0.5
+    ) {
+      return [];
+    }
+    return buildings3D
+      .map((obj) => getSolarShadowPolygon(obj.pts, obj.height))
+      .filter((poly): poly is { x: number; y: number; elev: number }[] => poly !== null && poly.length >= 3);
+  }, [
+    analysisMode,
+    solarParams?.showShadows,
+    layerVisibility.buildings,
+    sunPosition,
+    buildings3D,
+    meshData,
+    n,
+    m,
+    getGridElevAt,
+  ]);
+
+  const projectSolarShadow3D = useMemo(() => {
+    if (
+      analysisMode !== 'solar' ||
+      !solarParams?.showShadows ||
+      !projectVolume ||
+      projectVolume.collapsed ||
+      !sunPosition ||
+      sunPosition.elevation <= 0.5
+    ) {
+      return null;
+    }
+    return getSolarShadowPolygon(projectVolume.pts, projectVolume.height);
+  }, [
+    analysisMode,
+    solarParams?.showShadows,
+    projectVolume,
+    sunPosition,
+    meshData,
+    n,
+    m,
+    getGridElevAt,
+  ]);
+
   const polygonArea = (pts: { x: number, y: number }[]) =>
     computePolygonAreaM2(pts, meshData, n, m);
 
@@ -1334,21 +1366,17 @@ export default function ContourViewer({
             />
           ))}
 
-          {/* Sombras Solares de Edificios OSM */}
+          {/* Sombras Solares de Edificios OSM (Memoizadas per D-02 / PERF-02) */}
           {analysisMode === 'solar' && solarParams?.showShadows && layerVisibility.buildings &&
-            buildings3D.map((obj, i) => {
-              const poly = getSolarShadowPolygon(obj.pts, obj.height);
-              if (!poly) return null;
-              return (
-                <path
-                  key={`b-shadow-${i}`}
-                  d={render3DPath(poly, true)}
-                  fill="var(--theme-shadow-solar)"
-                  fillOpacity="0.35"
-                  className="pointer-events-none"
-                />
-              );
-            })}
+            buildingSolarShadows3D.map((poly, i) => (
+              <path
+                key={`b-shadow-${i}`}
+                d={render3DPath(poly, true)}
+                fill="var(--theme-shadow-solar)"
+                fillOpacity="0.35"
+                className="pointer-events-none"
+              />
+            ))}
 
           {/* Huellas de Edificios de Contexto OSM */}
           {layerVisibility.buildings && buildings3D.map((obj, i) => {
@@ -1708,17 +1736,15 @@ export default function ContourViewer({
           {/* MODO SOLAR: Proyecto y Arco Solar */}
           {analysisMode === 'solar' && (
             <g>
-              {projectVolume && !projectVolume.collapsed && solarParams?.showShadows && (() => {
-                const shadow = getSolarShadowPolygon(projectVolume.pts, projectVolume.height);
-                return shadow && (
-                  <path
-                    d={render3DPath(shadow, true)}
-                    fill="var(--theme-shadow-solar)"
-                    fillOpacity="0.35"
-                    className="pointer-events-none"
-                  />
-                );
-              })()}
+              {/* Sombra Solar del Volumen Propuesto (Memoizada per D-02 / PERF-02) */}
+              {projectSolarShadow3D && (
+                <path
+                  d={render3DPath(projectSolarShadow3D, true)}
+                  fill="var(--theme-shadow-solar)"
+                  fillOpacity="0.45"
+                  className="pointer-events-none"
+                />
+              )}
 
               {/* Lote y Volumen en Modo Solar */}
               <g
