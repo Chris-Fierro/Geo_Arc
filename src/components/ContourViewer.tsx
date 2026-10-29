@@ -10,6 +10,8 @@ import {
   computePolygonAreaM2,
   convexHull3D,
   clipWayToBBox,
+  clampLotDragOffset,
+  translateLotPolygon,
 } from '../lib/ogucService';
 
 interface ContourViewerProps {
@@ -68,6 +70,7 @@ export default function ContourViewer({
 
   // Estados para el arrastre del volumen (Etapa 1)
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const latestDragOffsetRef = useRef({ x: 0, y: 0 });
   const isDraggingVolumeRef = useRef(false);
   const dragStartRef = useRef({ cx: 0, cy: 0, ox: 0, oy: 0 });
 
@@ -614,6 +617,7 @@ export default function ContourViewer({
 
   // Reset dragOffset whenever customLotPts changes externally
   useEffect(() => {
+    latestDragOffsetRef.current = { x: 0, y: 0 };
     setDragOffset({ x: 0, y: 0 });
   }, [customLotPts]);
 
@@ -709,18 +713,15 @@ export default function ContourViewer({
     [ogucParams]
   );
 
-  const effectiveLotBasePts = useMemo(() => {
+  const baseLotPtsWithoutOffset = useMemo<{ x: number; y: number }[] | null>(() => {
     if (customLotPts && customLotPts.length >= 3) {
-      return customLotPts.map((p) => ({
-        x: Math.max(0, Math.min(n - 1, p.x + dragOffset.x)),
-        y: Math.max(0, Math.min(m - 1, p.y + dragOffset.y)),
-      }));
+      return customLotPts.map((p) => ({ x: p.x, y: p.y }));
     }
     if (isDrawingLot) return null;
 
     // Lote por defecto centrado en el terreno cuando aún no se ha dibujado uno personalizado
-    const cx = (n - 1) / 2 + dragOffset.x;
-    const cy = (m - 1) / 2 + dragOffset.y;
+    const cx = (n - 1) / 2;
+    const cy = (m - 1) / 2;
     const hw = n * 0.11;
     const hh = m * 0.11;
     return [
@@ -729,7 +730,71 @@ export default function ContourViewer({
       { x: cx + hw, y: cy + hh },
       { x: cx - hw, y: cy + hh },
     ];
-  }, [customLotPts, isDrawingLot, n, m, dragOffset]);
+  }, [customLotPts, isDrawingLot, n, m]);
+
+  const effectiveLotBasePts = useMemo(() => {
+    if (!baseLotPtsWithoutOffset) return null;
+    const clamped = clampLotDragOffset(baseLotPtsWithoutOffset, dragOffset.x, dragOffset.y, n, m);
+    return baseLotPtsWithoutOffset.map((p) => ({
+      x: p.x + clamped.x,
+      y: p.y + clamped.y,
+    }));
+  }, [baseLotPtsWithoutOffset, dragOffset, n, m]);
+
+  const handleVolumePointerDown = (e: React.PointerEvent) => {
+    if (isDrawingLot || e.button !== 0 || !baseLotPtsWithoutOffset) return;
+    e.stopPropagation();
+
+    const startGrid = screenToGrid(e.clientX, e.clientY);
+    if (!startGrid) return;
+
+    isDraggingVolumeRef.current = true;
+    dragStartRef.current = {
+      cx: startGrid.x,
+      cy: startGrid.y,
+      ox: latestDragOffsetRef.current.x,
+      oy: latestDragOffsetRef.current.y,
+    };
+
+    const handleMove = (ev: PointerEvent) => {
+      if (!isDraggingVolumeRef.current || !baseLotPtsWithoutOffset) return;
+      const currGrid = screenToGrid(ev.clientX, ev.clientY);
+      if (!currGrid) return;
+
+      const rawDx = dragStartRef.current.ox + (currGrid.x - dragStartRef.current.cx);
+      const rawDy = dragStartRef.current.oy + (currGrid.y - dragStartRef.current.cy);
+      const clamped = clampLotDragOffset(baseLotPtsWithoutOffset, rawDx, rawDy, n, m);
+
+      latestDragOffsetRef.current = clamped;
+      setDragOffset(clamped);
+    };
+
+    const handleUp = () => {
+      isDraggingVolumeRef.current = false;
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
+
+      const finalOffset = latestDragOffsetRef.current;
+      if (Math.hypot(finalOffset.x, finalOffset.y) > 1e-4 && setCustomLotPts && baseLotPtsWithoutOffset) {
+        const committedPts = translateLotPolygon(
+          baseLotPtsWithoutOffset,
+          finalOffset.x,
+          finalOffset.y,
+          n,
+          m,
+          getGridElevAt
+        );
+        latestDragOffsetRef.current = { x: 0, y: 0 };
+        setDragOffset({ x: 0, y: 0 });
+        setCustomLotPts(committedPts);
+      }
+    };
+
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
+  };
 
   const ogucModel = useMemo(() => {
     if ((analysisMode !== 'oguc' && analysisMode !== 'solar') || !effectiveLotBasePts) return null;
@@ -847,7 +912,7 @@ export default function ContourViewer({
     zoomBehavior.current = d3.zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.3, 120])
       .filter((event) => {
-        if (isDrawingLot) return false;
+        if (isDrawingLot || isDraggingVolumeRef.current) return false;
         
         // En perspectiva: Left-click queda libre para rotar. Paneo se mueve a click derecho/central.
         if (viewModeRef.current === 'perspective') {
@@ -1536,7 +1601,11 @@ export default function ContourViewer({
 
               {/* 2. POLÍGONO DE LOTE */}
               {!isDrawingLot && ogucModel.lotPolygon.length >= 3 && (
-                <g>
+                <g
+                  onPointerDown={handleVolumePointerDown}
+                  onMouseDown={(e) => { if (!isDrawingLot && e.button === 0) e.stopPropagation(); }}
+                  className={!isDrawingLot ? 'cursor-grab active:cursor-grabbing' : ''}
+                >
                   <path
                     d={render3DPath(ogucModel.lotPolygon, true)}
                     fill="#ec4899"
@@ -1562,131 +1631,91 @@ export default function ContourViewer({
               )}
 
               {/* 3. VOLUMEN PROPUESTO (CON ESCALONAMIENTO ART. 2.6.12 Y PLACA CONTINUA) + ARRASTRE REACTIVO */}
-              {!ogucModel.collapsed && ogucModel.tiers.length > 0 && (() => {
-                const handleVolumePointerDown = (e: React.PointerEvent) => {
-                  if (isDrawingLot || e.button !== 0) return;
-                  e.stopPropagation();
+              {!ogucModel.collapsed && ogucModel.tiers.length > 0 && (
+                <g
+                  onPointerDown={handleVolumePointerDown}
+                  onMouseDown={(e) => { if (!isDrawingLot && e.button === 0) e.stopPropagation(); }}
+                  className={!isDrawingLot ? 'cursor-grab active:cursor-grabbing' : ''}
+                >
+                  {ogucModel.tiers.map((tier) => {
+                    const { basePts, roofPts, id } = tier;
+                    if (basePts.length < 3) return null;
 
-                  const startGrid = screenToGrid(e.clientX, e.clientY);
-                  if (!startGrid) return;
+                    const cxBase = basePts.reduce((s, p) => s + p.x, 0) / basePts.length;
+                    const cyBase = basePts.reduce((s, p) => s + p.y, 0) / basePts.length;
 
-                  isDraggingVolumeRef.current = true;
-                  dragStartRef.current = {
-                    cx: startGrid.x,
-                    cy: startGrid.y,
-                    ox: dragOffset.x,
-                    oy: dragOffset.y,
-                  };
+                    const isUpper = id === 'upper_stepped';
+                    const isContinuous = id === 'continuous';
 
-                  const handleMove = (ev: PointerEvent) => {
-                    if (!isDraggingVolumeRef.current) return;
-                    const currGrid = screenToGrid(ev.clientX, ev.clientY);
-                    if (!currGrid) return;
+                    // Build wall quads and sort back-to-front in perspective
+                    const walls = basePts.map((p, j) => {
+                      const pNext = basePts[(j + 1) % basePts.length];
+                      const rNext = roofPts[(j + 1) % roofPts.length];
+                      const rp = roofPts[j];
 
-                    const dx = currGrid.x - dragStartRef.current.cx;
-                    const dy = currGrid.y - dragStartRef.current.cy;
+                      const midX = (p.x + pNext.x) / 2;
+                      const midY = (p.y + pNext.y) / 2;
+                      const dx = midX - cxBase;
+                      const dy = midY - cyBase;
 
-                    setDragOffset({
-                      x: dragStartRef.current.ox + dx,
-                      y: dragStartRef.current.oy + dy,
-                    });
-                  };
+                      let fillColor = isUpper ? '#d97706' : isContinuous ? '#64748b' : '#b45309'; // Oriente/Poniente
+                      let fillOpacity = isContinuous ? '0.45' : '0.68';
+                      const strokeColor = isUpper ? '#fcd34d' : isContinuous ? '#94a3b8' : '#f59e0b';
 
-                  const handleUp = () => {
-                    isDraggingVolumeRef.current = false;
-                    window.removeEventListener('pointermove', handleMove);
-                    window.removeEventListener('pointerup', handleUp);
-                  };
-
-                  window.addEventListener('pointermove', handleMove);
-                  window.addEventListener('pointerup', handleUp);
-                };
-
-                return (
-                  <g
-                    onPointerDown={handleVolumePointerDown}
-                    className={!isDrawingLot ? 'cursor-grab active:cursor-grabbing' : ''}
-                  >
-                    {ogucModel.tiers.map((tier) => {
-                      const { basePts, roofPts, id } = tier;
-                      if (basePts.length < 3) return null;
-
-                      const cxBase = basePts.reduce((s, p) => s + p.x, 0) / basePts.length;
-                      const cyBase = basePts.reduce((s, p) => s + p.y, 0) / basePts.length;
-
-                      const isUpper = id === 'upper_stepped';
-                      const isContinuous = id === 'continuous';
-
-                      // Build wall quads and sort back-to-front in perspective
-                      const walls = basePts.map((p, j) => {
-                        const pNext = basePts[(j + 1) % basePts.length];
-                        const rNext = roofPts[(j + 1) % roofPts.length];
-                        const rp = roofPts[j];
-
-                        const midX = (p.x + pNext.x) / 2;
-                        const midY = (p.y + pNext.y) / 2;
-                        const dx = midX - cxBase;
-                        const dy = midY - cyBase;
-
-                        let fillColor = isUpper ? '#d97706' : isContinuous ? '#64748b' : '#b45309'; // Oriente/Poniente
-                        let fillOpacity = isContinuous ? '0.45' : '0.68';
-                        const strokeColor = isUpper ? '#fcd34d' : isContinuous ? '#94a3b8' : '#f59e0b';
-
-                        if (Math.abs(dy) >= Math.abs(dx)) {
-                          if (dy >= 0) {
-                            // Cara Sur (+Y): más oscura para enfatizar orientación
-                            fillColor = isUpper ? '#78350f' : isContinuous ? '#334155' : '#92400e';
-                            fillOpacity = '0.88';
-                          } else {
-                            // Cara Norte (-Y): más iluminada
-                            fillColor = isUpper ? '#fde68a' : isContinuous ? '#94a3b8' : '#fbbf24';
-                            fillOpacity = '0.42';
-                          }
+                      if (Math.abs(dy) >= Math.abs(dx)) {
+                        if (dy >= 0) {
+                          // Cara Sur (+Y): más oscura para enfatizar orientación
+                          fillColor = isUpper ? '#78350f' : isContinuous ? '#334155' : '#92400e';
+                          fillOpacity = '0.88';
+                        } else {
+                          // Cara Norte (-Y): más iluminada
+                          fillColor = isUpper ? '#fde68a' : isContinuous ? '#94a3b8' : '#fbbf24';
+                          fillOpacity = '0.42';
                         }
-
-                        const projMid = projectPoint(midX, midY, (p.elev + rp.elev) / 2);
-                        return {
-                          j,
-                          quad: [p, pNext, rNext, rp],
-                          fillColor,
-                          fillOpacity,
-                          strokeColor,
-                          depthY: projMid.Y,
-                        };
-                      });
-
-                      if (isPerspective) {
-                        walls.sort((a, b) => a.depthY - b.depthY);
                       }
 
-                      return (
-                        <g key={`tier-${id}`}>
-                          {isPerspective &&
-                            walls.map((w) => (
-                              <path
-                                key={`wall-${id}-${w.j}`}
-                                d={render3DPath(w.quad, true)}
-                                fill={w.fillColor}
-                                fillOpacity={w.fillOpacity}
-                                stroke={w.strokeColor}
-                                strokeWidth="0.6"
-                                vectorEffect="non-scaling-stroke"
-                              />
-                            ))}
-                          <path
-                            d={render3DPath(roofPts, true)}
-                            fill={isUpper ? '#fbbf24' : isContinuous ? '#94a3b8' : '#f59e0b'}
-                            fillOpacity={isContinuous ? '0.35' : '0.75'}
-                            stroke={isUpper ? '#fef08a' : '#f59e0b'}
-                            strokeWidth={isUpper ? 1.2 : 0.9}
-                            vectorEffect="non-scaling-stroke"
-                          />
-                        </g>
-                      );
-                    })}
-                  </g>
-                );
-              })()}
+                      const projMid = projectPoint(midX, midY, (p.elev + rp.elev) / 2);
+                      return {
+                        j,
+                        quad: [p, pNext, rNext, rp],
+                        fillColor,
+                        fillOpacity,
+                        strokeColor,
+                        depthY: projMid.Y,
+                      };
+                    });
+
+                    if (isPerspective) {
+                      walls.sort((a, b) => a.depthY - b.depthY);
+                    }
+
+                    return (
+                      <g key={`tier-${id}`}>
+                        {isPerspective &&
+                          walls.map((w) => (
+                            <path
+                              key={`wall-${id}-${w.j}`}
+                              d={render3DPath(w.quad, true)}
+                              fill={w.fillColor}
+                              fillOpacity={w.fillOpacity}
+                              stroke={w.strokeColor}
+                              strokeWidth="0.6"
+                              vectorEffect="non-scaling-stroke"
+                            />
+                          ))}
+                        <path
+                          d={render3DPath(roofPts, true)}
+                          fill={isUpper ? '#fbbf24' : isContinuous ? '#94a3b8' : '#f59e0b'}
+                          fillOpacity={isContinuous ? '0.35' : '0.75'}
+                          stroke={isUpper ? '#fef08a' : '#f59e0b'}
+                          strokeWidth={isUpper ? 1.2 : 0.9}
+                          vectorEffect="non-scaling-stroke"
+                        />
+                      </g>
+                    );
+                  })}
+                </g>
+              )}
 
               {/* 4. PLANOS DE RASANTES REALES INCLINADOS (MÓDULO 2 - Art. 2.6.3) */}
               {!ogucModel.collapsed && ogucModel.rasantePlanes.length > 0 && (
@@ -1862,49 +1891,55 @@ export default function ContourViewer({
               })()}
 
               {/* Lote y Volumen en Modo Solar */}
-              {lotPolygon && (
-                <path
-                  d={render3DPath(lotPolygon, true)}
-                  fill="none"
-                  stroke="#ec4899"
-                  strokeWidth={1}
-                  strokeDasharray="3,2"
-                  vectorEffect="non-scaling-stroke"
-                />
-              )}
+              <g
+                onPointerDown={handleVolumePointerDown}
+                onMouseDown={(e) => { if (!isDrawingLot && e.button === 0) e.stopPropagation(); }}
+                className={!isDrawingLot ? 'cursor-grab active:cursor-grabbing' : ''}
+              >
+                {lotPolygon && (
+                  <path
+                    d={render3DPath(lotPolygon, true)}
+                    fill="none"
+                    stroke="#ec4899"
+                    strokeWidth={1}
+                    strokeDasharray="3,2"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                )}
 
-              {ogucModel && !ogucModel.collapsed && ogucModel.tiers.map((tier) => {
-                const { basePts, roofPts, id } = tier;
-                const pathRoof = render3DPath(roofPts, true);
-                return (
-                  <g key={`solar-tier-${id}`}>
-                    {isPerspective && basePts.map((p, j) => {
-                      const pNext = basePts[(j + 1) % basePts.length];
-                      const rNext = roofPts[(j + 1) % roofPts.length];
-                      const rp = roofPts[j];
-                      return (
-                        <path
-                          key={j}
-                          d={render3DPath([p, pNext, rNext, rp], true)}
-                          fill="#f59e0b"
-                          fillOpacity="0.5"
-                          stroke="#f59e0b"
-                          strokeWidth="0.5"
-                          vectorEffect="non-scaling-stroke"
-                        />
-                      );
-                    })}
-                    <path
-                      d={pathRoof}
-                      fill="#f59e0b"
-                      fillOpacity="0.7"
-                      stroke="#f59e0b"
-                      strokeWidth="1"
-                      vectorEffect="non-scaling-stroke"
-                    />
-                  </g>
-                );
-              })}
+                {ogucModel && !ogucModel.collapsed && ogucModel.tiers.map((tier) => {
+                  const { basePts, roofPts, id } = tier;
+                  const pathRoof = render3DPath(roofPts, true);
+                  return (
+                    <g key={`solar-tier-${id}`}>
+                      {isPerspective && basePts.map((p, j) => {
+                        const pNext = basePts[(j + 1) % basePts.length];
+                        const rNext = roofPts[(j + 1) % roofPts.length];
+                        const rp = roofPts[j];
+                        return (
+                          <path
+                            key={j}
+                            d={render3DPath([p, pNext, rNext, rp], true)}
+                            fill="#f59e0b"
+                            fillOpacity="0.5"
+                            stroke="#f59e0b"
+                            strokeWidth="0.5"
+                            vectorEffect="non-scaling-stroke"
+                          />
+                        );
+                      })}
+                      <path
+                        d={pathRoof}
+                        fill="#f59e0b"
+                        fillOpacity="0.7"
+                        stroke="#f59e0b"
+                        strokeWidth="1"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                    </g>
+                  );
+                })}
+              </g>
 
               {/* Heliodon: Guías (Horizonte, Elevaciones, Meridiano) en PERSPECTIVA */}
               {isPerspective && heliodonGuides && (
