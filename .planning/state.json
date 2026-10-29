@@ -6,7 +6,7 @@
     {
       "number": "1",
       "name": "Precisión Normativa OGUC y Motor Solar",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "2",
@@ -26,8 +26,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step",
-    "reason": "Phase 1 of 4 · executing"
+    "label": "Advance to the next step (verify)",
+    "reason": "Phase 1 of 4 · ready to verify"
   },
-  "updated_at": "2026-10-28T20:07:43.875Z"
+  "updated_at": "2026-10-29T01:28:28.634Z"
 }

@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v1.4
 current_phase: 01
 current_phase_name: Precisión Normativa OGUC y Motor Solar
-status: executing
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-10-28T20:07:46.436Z"
+status: verifying
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-10-29T01:29:05.843Z"
 last_activity: 2026-10-28
 last_activity_desc: Phase 01 execution started
-state_head: 2a71f891d24b2f2120da210ef320e11c7a59dce4
+state_head: a38e1913eac103b5e6c07528cf7e3e56c22b4876
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 2
-  completed_plans: 1
+  completed_plans: 2
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-10-28)
 
 Phase: 01 (Precisión Normativa OGUC y Motor Solar) — EXECUTING
 Plan: 2 of 2
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-28 — Phase 01 execution started
 
 Progress: [░░░░░░░░░░] 0%
@@ -60,6 +60,7 @@ Progress: [░░░░░░░░░░] 0%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 01 P01 | 6min | 2 tasks | 1 files |
+| Phase 01 P02 | 8min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -73,6 +74,8 @@ Recent decisions affecting current work:
 - [Init]: Implementar persistencia local en `IndexedDB` para soportar `MeshData` y ortofotos satelitales de varios MB sin el límite de 5 MB de `localStorage`.
 - [Phase 01]: Pipeline de retranqueo poligonal en 4 etapas en insetPolygonBisector con miterScale <= 2.5 y poda de auto-intersecciones para lotes cóncavos
 - [Phase 01]: Proyección de sombra propuesta OGUC multinivel (projectMultiTierDirectionalShadowOnTerrain) aterrizando cada tier a la cota real del terreno (getGridElevAt)
+- [Phase 01]: D-04: getSolarTimezoneOffset dinamico con soporte DST chileno (America/Santiago UTC-3/UTC-4) y Magallanes (UTC-3 permanente), y parseLocalSolarDate a mediodia local
+- [Phase 01]: D-02: Arrastre rigido de lote en ContourViewer.tsx con clampLotDragOffset, desacople con latestDragOffsetRef y commit a customLotPts con remuestreo de elevacion en pointerup
 
 ### Pending Todos
 
@@ -92,6 +95,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-28T20:07:46.403Z
-Stopped at: Completed 01-01-PLAN.md
+Last session: 2026-10-29T01:29:05.805Z
+Stopped at: Completed 01-02-PLAN.md
 Resume file: None

@@ -8,9 +8,9 @@
 ### Normativa OGUC y Motor Solar (`OGUC`)
 
 - [x] **OGUC-01**: El usuario puede visualizar y evaluar la sombra propuesta OGUC (Art. 2.6.12) proyectada a partir de la unión de huellas de todos los niveles volumétricos activos (`continuous`, `main`, `upper_stepped`) en lugar de considerar únicamente la terraza superior.
-- [ ] **OGUC-02**: El usuario puede arrastrar la posición del volumen/lote en el visor Topográfico 2.5D (`ContourViewer`) y ver reflejado el mismo desplazamiento inmediatamente en el visor 3D Satelital (`ThreeTerrainViewer`) y al guardar/cargar archivos `.geoarc`.
+- [x] **OGUC-02**: El usuario puede arrastrar la posición del volumen/lote en el visor Topográfico 2.5D (`ContourViewer`) y ver reflejado el mismo desplazamiento inmediatamente en el visor 3D Satelital (`ThreeTerrainViewer`) y al guardar/cargar archivos `.geoarc`.
 - [x] **OGUC-03**: El usuario puede dibujar lotes irregulares cóncavos (ej. en forma de "L" o "U") y obtener polígonos de distanciamiento interior (`insetPolygonBisector`) sin auto-intersecciones de aristas que deformen la extrusión 3D ni el área normativa.
-- [ ] **OGUC-04**: El usuario obtiene cálculos de posición solar (`altitud` y `azimut` en `SunPosition.ts`) con huso horario preciso según longitud/fecha (incluyendo horario de verano/invierno en Chile UTC-3/UTC-4) y parseo de fechas `YYYY-MM-DD` en hora local sin desfase de medianoche UTC.
+- [x] **OGUC-04**: El usuario obtiene cálculos de posición solar (`altitud` y `azimut` en `SunPosition.ts`) con huso horario preciso según longitud/fecha (incluyendo horario de verano/invierno en Chile UTC-3/UTC-4) y parseo de fechas `YYYY-MM-DD` en hora local sin desfase de medianoche UTC.
 
 ### Interoperabilidad CAD / GIS / 3D (`CAD`)
 
@@ -52,9 +52,9 @@
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | OGUC-01 | Phase 1: Precisión Normativa OGUC y Motor Solar | Complete |
-| OGUC-02 | Phase 1: Precisión Normativa OGUC y Motor Solar | Pending |
+| OGUC-02 | Phase 1: Precisión Normativa OGUC y Motor Solar | Complete |
 | OGUC-03 | Phase 1: Precisión Normativa OGUC y Motor Solar | Complete |
-| OGUC-04 | Phase 1: Precisión Normativa OGUC y Motor Solar | Pending |
+| OGUC-04 | Phase 1: Precisión Normativa OGUC y Motor Solar | Complete |
 | CAD-01 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Pending |
 | CAD-02 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Pending |
 | CAD-03 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Pending |
