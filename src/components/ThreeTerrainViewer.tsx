@@ -48,6 +48,37 @@ interface ThreeTerrainViewerProps {
   setCustomLotPts?: (pts: { x: number; y: number; elev: number }[] | null) => void;
 }
 
+/**
+ * Liberación recursiva canónica de recursos GPU (geometrías, materiales y texturas)
+ * para prevención de fugas de memoria VRAM en WebGL per D-03 y PERF-03.
+ */
+export function disposeObjectTree(obj: THREE.Object3D): void {
+  if (!obj) return;
+  obj.traverse((child: any) => {
+    // 1. Liberar geometría
+    if (child.geometry && typeof child.geometry.dispose === 'function') {
+      child.geometry.dispose();
+    }
+    // 2. Liberar materiales individuales o arreglos de materiales
+    if (child.material) {
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const mat of materials) {
+        if (!mat) continue;
+        // Liberar texturas asociadas (map, normalMap, roughnessMap, alphaMap, etc.)
+        for (const key of Object.keys(mat)) {
+          const val = mat[key];
+          if (val && typeof val === 'object' && val.isTexture && typeof val.dispose === 'function') {
+            val.dispose();
+          }
+        }
+        if (typeof mat.dispose === 'function') {
+          mat.dispose();
+        }
+      }
+    }
+  });
+}
+
 export default function ThreeTerrainViewer({
   meshData,
   satelliteTextureUrl,
@@ -288,6 +319,11 @@ export default function ThreeTerrainViewer({
     return () => {
       cancelAnimationFrame(animId);
       resizeObserver.disconnect();
+      while (scene.children.length > 0) {
+        const obj = scene.children[0];
+        disposeObjectTree(obj);
+        scene.remove(obj);
+      }
       renderer.dispose();
       controls.dispose();
     };
@@ -318,8 +354,8 @@ export default function ThreeTerrainViewer({
         c.name.startsWith('Helper_Axes')
     );
     for (const obj of oldObjects) {
+      disposeObjectTree(obj);
       scene.remove(obj);
-      if ((obj as THREE.Mesh).geometry) (obj as THREE.Mesh).geometry.dispose();
     }
 
     // 1 & 2. Unified Terrain & Buildings Scene Construction
@@ -525,6 +561,7 @@ export default function ThreeTerrainViewer({
         c.name === 'Helper_SunRay'
     );
     for (const obj of oldOverlays) {
+      disposeObjectTree(obj);
       scene.remove(obj);
     }
 
