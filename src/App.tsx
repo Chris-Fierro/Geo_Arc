@@ -10,7 +10,7 @@ import ContourViewer from './components/ContourViewer';
 import ThreeTerrainViewer from './components/ThreeTerrainViewer';
 import { MeshData } from './lib/meshProcessor';
 import OsmImporter from './components/OsmImporter';
-import { getSunPosition } from './lib/SunPosition';
+import { getSunPosition, parseLocalSolarDate } from './lib/SunPosition';
 import { exportToObjZip, exportToGlb, triggerBrowserDownload } from './lib/exportService';
 import { fetchOsmLayersForBBox } from './lib/ogucService';
 
@@ -1036,7 +1036,7 @@ export default function App() {
                         angle: ogucRegionGroup === 1 ? 63 : ogucRegionGroup === 2 ? 57 : 51
                       }}
                       solarParams={{
-                        date: new Date(solarDate),
+                        date: parseLocalSolarDate(solarDate),
                         time: solarTime,
                         showSunPath,
                         showShadows: showSolarShadows
@@ -1054,7 +1054,7 @@ export default function App() {
                   ) : (
                     <ContourViewer 
                       interval={interval} 
-                      fileName={fileName} 
+                       fileName={fileName} 
                       meshData={meshData} 
                       zExaggeration={zExaggeration} 
                       colorPalette={colorPalette}
@@ -1076,7 +1076,7 @@ export default function App() {
                         angle: ogucRegionGroup === 1 ? 63 : ogucRegionGroup === 2 ? 57 : 51 // Legacy fallback
                       }}
                       solarParams={{
-                        date: new Date(solarDate),
+                        date: parseLocalSolarDate(solarDate),
                         time: solarTime,
                         showSunPath,
                         showShadows: showSolarShadows

@@ -3,7 +3,7 @@ import * as d3 from 'd3';
 import { Map, Layers, ZoomIn, ZoomOut, Maximize, RotateCw, Download } from 'lucide-react';
 import { MeshData } from '../lib/meshProcessor';
 import { AnalysisMode } from '../App';
-import { getSunPosition } from '../lib/SunPosition';
+import { getSunPosition, parseLocalSolarDate } from '../lib/SunPosition';
 import {
   OgucParams,
   computeOgucModel,
@@ -438,7 +438,7 @@ export default function ContourViewer({
   };
   const sunPosition = useMemo(() => {
     if (analysisMode !== 'solar' || !solarParams) return null;
-    const date = new Date(solarParams.date);
+    const date = parseLocalSolarDate(solarParams.date);
     return getSunPosition(locationLat, locationLon, date, solarParams.time);
   }, [analysisMode, solarParams, locationLat, locationLon]);
 
