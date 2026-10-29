@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { OBJExporter, GLTFExporter } from 'three-stdlib';
+import { OBJExporter, GLTFExporter, STLExporter } from 'three-stdlib';
 import * as fflate from 'fflate';
 import type { MeshData } from './meshProcessor';
 import { clipWayToBBox } from './ogucService';
@@ -21,6 +21,17 @@ export interface DxfExportParams {
   crs?: string;
   layerVisibility?: { buildings?: boolean; highways?: boolean; waterways?: boolean };
   customLotPts?: { x: number; y: number; elev: number }[] | null;
+}
+
+export interface ThreeSceneBuildOptions {
+  zExaggeration?: number;
+  satelliteTexture?: THREE.Texture | null;
+  includeBuildings?: boolean;
+  wireframe?: boolean;
+  terrainColor?: number;
+  buildingEdges?: boolean;
+  baseTerrainName?: string;
+  buildingsGroupName?: string;
 }
 
 /**
@@ -65,10 +76,28 @@ export function sampleBilinearElevation(
  */
 export function buildThreeSceneFromMeshData(
   meshData: MeshData,
-  zExaggeration: number = 1.0,
-  satelliteTexture?: THREE.Texture | null,
-  includeBuildings: boolean = true
+  options: number | ThreeSceneBuildOptions = 1.0,
+  legacySatelliteTexture?: THREE.Texture | null,
+  legacyIncludeBuildings: boolean = true
 ): THREE.Scene {
+  const opts: ThreeSceneBuildOptions =
+    typeof options === 'number'
+      ? {
+          zExaggeration: options,
+          satelliteTexture: legacySatelliteTexture,
+          includeBuildings: legacyIncludeBuildings,
+        }
+      : options;
+
+  const zExaggeration = opts.zExaggeration ?? 1.0;
+  const satelliteTexture = opts.satelliteTexture ?? null;
+  const includeBuildings = opts.includeBuildings !== false;
+  const wireframe = opts.wireframe ?? false;
+  const terrainColor = opts.terrainColor ?? 0x88aa77;
+  const buildingEdges = opts.buildingEdges ?? false;
+  const baseTerrainName = opts.baseTerrainName ?? 'Terreno_Topografico';
+  const buildingsGroupName = opts.buildingsGroupName ?? 'Edificios_Contexto';
+
   const scene = new THREE.Scene();
   scene.name = 'GeoArc_Terrain_Scene';
 
@@ -103,20 +132,22 @@ export function buildThreeSceneFromMeshData(
       map: satelliteTexture,
       roughness: 0.8,
       metalness: 0.05,
+      wireframe,
       side: THREE.DoubleSide,
       name: 'Terreno_Satelital_Mat',
     });
   } else {
     terrainMat = new THREE.MeshStandardMaterial({
-      color: 0x88aa77,
+      color: terrainColor,
       roughness: 0.9,
+      wireframe,
       side: THREE.DoubleSide,
       name: 'Terreno_Base_Mat',
     });
   }
 
   const terrainMesh = new THREE.Mesh(geom, terrainMat);
-  terrainMesh.name = 'Terreno_Topografico';
+  terrainMesh.name = baseTerrainName;
   terrainMesh.castShadow = true;
   terrainMesh.receiveShadow = true;
   scene.add(terrainMesh);
@@ -134,6 +165,13 @@ export function buildThreeSceneFromMeshData(
       name: 'Edificios_Contexto_Mat',
     });
 
+    const edgeMat = buildingEdges
+      ? new THREE.LineBasicMaterial({
+          color: 0x222222,
+          linewidth: 1.5,
+        })
+      : null;
+
     const getElevAtM = (lon: number, lat: number) => {
       const u = ((lon - minLon) / widthSpan) * (cols - 1);
       const v = ((maxLat - lat) / heightSpan) * (rows - 1);
@@ -141,7 +179,7 @@ export function buildThreeSceneFromMeshData(
     };
 
     const buildingsGroup = new THREE.Group();
-    buildingsGroup.name = 'Edificios_Contexto';
+    buildingsGroup.name = buildingsGroupName;
 
     const elements = meshData.buildings.elements;
     for (const el of elements) {
@@ -242,6 +280,13 @@ export function buildThreeSceneFromMeshData(
           bMesh.position.set(avgX, baseLevelM, avgZ);
           bMesh.castShadow = true;
           bMesh.receiveShadow = true;
+
+          if (edgeMat) {
+            const edges = new THREE.EdgesGeometry(extrudeGeom);
+            const line = new THREE.LineSegments(edges, edgeMat);
+            bMesh.add(line);
+          }
+
           buildingsGroup.add(bMesh);
         } catch (_) {}
       }
@@ -670,3 +715,24 @@ export async function exportToGlb(options: Export3DOptions) {
   const blob = new Blob([glbArrayBuffer], { type: 'model/gltf-binary' });
   triggerBrowserDownload(blob, `${fileName}_sketchup.glb`);
 }
+
+/**
+ * Exports the complete 3D scene as a standalone binary .STL file.
+ */
+export async function exportToStl(options: Export3DOptions): Promise<void> {
+  const { meshData, zExaggeration = 1.0, fileName = 'terreno_geoarc' } = options;
+  const cleanName = fileName.replace(/\.[^/.]+$/, '');
+
+  const scene = buildThreeSceneFromMeshData(meshData, {
+    zExaggeration,
+    includeBuildings: options.includeBuildings !== false,
+  });
+
+  const exporter = new STLExporter();
+  const result = exporter.parse(scene, { binary: true });
+
+  const dataView = result as any as DataView;
+  const blob = new Blob([dataView.buffer], { type: 'application/octet-stream' });
+  triggerBrowserDownload(blob, `modelo_${cleanName}.stl`);
+}
+

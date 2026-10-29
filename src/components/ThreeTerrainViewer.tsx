@@ -10,6 +10,7 @@ import {
   computePolygonAreaM2,
   clipWayToBBox,
 } from '../lib/ogucService';
+import { buildThreeSceneFromMeshData } from '../lib/exportService';
 import {
   Sun,
   Layers,
@@ -309,7 +310,9 @@ export default function ThreeTerrainViewer({
     const oldObjects = scene.children.filter(
       (c) =>
         c.name.startsWith('Terrain_') ||
+        c.name.startsWith('Terreno_') ||
         c.name.startsWith('Building_') ||
+        c.name.startsWith('Edificios_') ||
         c.name.startsWith('Roads_') ||
         c.name.startsWith('Waterways_') ||
         c.name.startsWith('Helper_Axes')
@@ -319,45 +322,28 @@ export default function ThreeTerrainViewer({
       if ((obj as THREE.Mesh).geometry) (obj as THREE.Mesh).geometry.dispose();
     }
 
-    // 1. Terrain Geometry
-    const geom = new THREE.PlaneGeometry(widthM, heightM, cols - 1, rows - 1);
-    geom.rotateX(-Math.PI / 2);
+    // 1 & 2. Unified Terrain & Buildings Scene Construction
+    const unifiedScene = buildThreeSceneFromMeshData(meshData, {
+      zExaggeration,
+      satelliteTexture: useTexture && loadedTexture ? loadedTexture : null,
+      includeBuildings: showBuildings3D && layerVisibility.buildings,
+      wireframe: showWireframe,
+      terrainColor: 0x475569,
+      buildingEdges: true,
+      baseTerrainName: 'Terrain_Mesh',
+      buildingsGroupName: 'Building_Group',
+    });
 
-    const posAttr = geom.attributes.position;
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const vertIdx = r * cols + c;
-        const elev = Math.max(minEv, meshData.grid[r * cols + c] ?? minEv);
-        const yVal = (elev - minEv) * zExaggeration;
-        posAttr.setY(vertIdx, yVal);
-      }
-    }
-    geom.computeVertexNormals();
-
-    let terrainMat: THREE.Material;
-    if (useTexture && loadedTexture) {
-      terrainMat = new THREE.MeshStandardMaterial({
-        map: loadedTexture,
-        roughness: 0.82,
-        metalness: 0.04,
-        wireframe: showWireframe,
-        side: THREE.DoubleSide,
-      });
-    } else {
-      terrainMat = new THREE.MeshStandardMaterial({
-        color: 0x475569,
-        roughness: 0.85,
-        wireframe: showWireframe,
-        side: THREE.DoubleSide,
-      });
+    const terrainMesh = unifiedScene.getObjectByName('Terrain_Mesh') as THREE.Mesh;
+    if (terrainMesh) {
+      scene.add(terrainMesh);
+      terrainMeshRef.current = terrainMesh;
     }
 
-    const terrainMesh = new THREE.Mesh(geom, terrainMat);
-    terrainMesh.name = 'Terrain_Mesh';
-    terrainMesh.receiveShadow = true;
-    terrainMesh.castShadow = true;
-    scene.add(terrainMesh);
-    terrainMeshRef.current = terrainMesh;
+    const buildingsGroup = unifiedScene.getObjectByName('Building_Group') as THREE.Group;
+    if (buildingsGroup) {
+      scene.add(buildingsGroup);
+    }
 
     const bbox = meshData.bbox || { minLon: 0, maxLon: 1, minLat: 0, maxLat: 1 };
     const { minLon, maxLon, minLat, maxLat } = bbox;
@@ -369,146 +355,6 @@ export default function ThreeTerrainViewer({
       const v = ((maxLat - lat) / heightSpan) * (rows - 1);
       return getGridElevAt(u, v) - minEv;
     };
-
-    // 2. Extruded Context Buildings
-    if (
-      showBuildings3D &&
-      layerVisibility.buildings &&
-      meshData.buildings?.elements &&
-      meshData.bbox
-    ) {
-      const buildingMat = new THREE.MeshStandardMaterial({
-        color: 0xffffff,
-        roughness: 0.25,
-        metalness: 0.05,
-      });
-
-      const edgeMat = new THREE.LineBasicMaterial({
-        color: 0x222222,
-        linewidth: 1.5,
-      });
-
-      const buildingsGroup = new THREE.Group();
-      buildingsGroup.name = 'Building_Group';
-
-      for (const el of meshData.buildings.elements) {
-        const geometriesToProcess: { lat: number; lon: number }[][] = [];
-        if (el.type === 'way' && el.tags?.building && el.geometry?.length >= 3) {
-          geometriesToProcess.push(el.geometry);
-        } else if (
-          el.type === 'relation' &&
-          el.tags?.building &&
-          Array.isArray(el.members)
-        ) {
-          for (const m of el.members) {
-            if (m.role === 'outer' && m.geometry?.length >= 3) {
-              geometriesToProcess.push(m.geometry);
-            }
-          }
-        }
-
-        let height = 4.0;
-        if (el.tags?.height) {
-          height = parseFloat(el.tags.height) || 4.0;
-        } else if (el.tags?.['building:levels']) {
-          height = (parseFloat(el.tags['building:levels']) || 1) * 3.5;
-        }
-
-        for (const geomCoords of geometriesToProcess) {
-          try {
-            const pts = [...geomCoords];
-            if (pts.length > 3) {
-              const first = pts[0];
-              const last = pts[pts.length - 1];
-              if (
-                Math.abs(first.lat - last.lat) < 1e-7 &&
-                Math.abs(first.lon - last.lon) < 1e-7
-              ) {
-                pts.pop();
-              }
-            }
-            if (pts.length < 3) continue;
-
-            // Skip buildings whose centroid falls outside the terrain bounding box
-            let sumLon = 0;
-            let sumLat = 0;
-            for (const pt of pts) {
-              sumLon += pt.lon;
-              sumLat += pt.lat;
-            }
-            const avgLon = sumLon / pts.length;
-            const avgLat = sumLat / pts.length;
-            if (
-              avgLon < minLon ||
-              avgLon > maxLon ||
-              avgLat < minLat ||
-              avgLat > maxLat
-            ) {
-              continue;
-            }
-
-            let avgX = 0;
-            let avgZ = 0;
-            let minFootprintElev = Infinity;
-            let maxFootprintElev = -Infinity;
-
-            const worldCoords: { wx: number; wz: number; elev: number }[] = [];
-            for (const pt of pts) {
-              const cLon = Math.max(minLon, Math.min(maxLon, pt.lon));
-              const cLat = Math.max(minLat, Math.min(maxLat, pt.lat));
-              const wx = ((cLon - minLon) / widthSpan - 0.5) * widthM;
-              const wz = ((maxLat - cLat) / heightSpan - 0.5) * heightM;
-              const elev = getElevAtM(cLon, cLat);
-              avgX += wx;
-              avgZ += wz;
-              if (elev < minFootprintElev) minFootprintElev = elev;
-              if (elev > maxFootprintElev) maxFootprintElev = elev;
-              worldCoords.push({ wx, wz, elev });
-            }
-
-            avgX /= pts.length;
-            avgZ /= pts.length;
-
-            const shapePts = worldCoords.map(
-              (c) => new THREE.Vector2(c.wx - avgX, -(c.wz - avgZ))
-            );
-
-            if (THREE.ShapeUtils.isClockWise(shapePts)) {
-              shapePts.reverse();
-            }
-
-            const shape = new THREE.Shape(shapePts);
-
-            const baseEmbed = 0.35;
-            const baseLevelM = Math.max(0, minFootprintElev - baseEmbed) * zExaggeration;
-            const slopeDelta =
-              Math.max(0, maxFootprintElev - minFootprintElev) * zExaggeration;
-            const totalDepth =
-              height * zExaggeration + slopeDelta + baseEmbed * zExaggeration;
-
-            const extrudeGeom = new THREE.ExtrudeGeometry(shape, {
-              depth: totalDepth,
-              bevelEnabled: false,
-            });
-
-            extrudeGeom.rotateX(-Math.PI / 2);
-
-            const bMesh = new THREE.Mesh(extrudeGeom, buildingMat);
-            bMesh.position.set(avgX, baseLevelM, avgZ);
-            bMesh.castShadow = true;
-            bMesh.receiveShadow = true;
-
-            const edges = new THREE.EdgesGeometry(extrudeGeom);
-            const line = new THREE.LineSegments(edges, edgeMat);
-            bMesh.add(line);
-
-            buildingsGroup.add(bMesh);
-          } catch (_) {}
-        }
-      }
-
-      scene.add(buildingsGroup);
-    }
 
     // 3. Highways / Road Network (clipped to terrain BBox & subdivided on terrain surface)
     if (

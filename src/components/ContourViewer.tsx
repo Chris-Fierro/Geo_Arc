@@ -13,7 +13,7 @@ import {
   clampLotDragOffset,
   translateLotPolygon,
 } from '../lib/ogucService';
-import { exportToDxf } from '../lib/exportService';
+import { exportToDxf, exportToStl } from '../lib/exportService';
 
 interface ContourViewerProps {
   interval: number;
@@ -1025,123 +1025,13 @@ export default function ContourViewer({
     });
   };
 
-  const buildThreeScene = (THREE: any) => {
-    if (!meshData) return null;
-    const scene = new THREE.Scene();
-
-    const trueN = Math.max(1, n - 1);
-    const trueM = Math.max(1, m - 1);
-
-    // Mapeamos SVG coordenadas a Metros espaciales centrados en 0,0
-    const mapXtoMeters = (x: number) => (x / trueN) * meshData.w - meshData.w / 2;
-    const mapYtoMetersZ = (y: number) => (y / trueM) * meshData.h - meshData.h / 2; // Mapea Y de SVG (0 es Norte) a Z (-Z es Norte en 3D)
-
-    // 1. TERRENO: Crear Malla Superficial
-    const segX = meshData.cols ? meshData.cols - 1 : trueN;
-    const segY = meshData.rows ? meshData.rows - 1 : trueM;
-    const geo = new THREE.PlaneGeometry(meshData.w, meshData.h, segX, segY);
-    geo.rotateX(-Math.PI / 2); // Recostar sobre el plano XZ
-
-    const pos = geo.attributes.position;
-    for (let i = 0; i < pos.count; i++) {
-      const vx = pos.getX(i);
-      const vz = pos.getZ(i);
-
-      // Coordenadas normalizadas 0..1 para rescatar Z de la cuadrícula
-      const normX = (vx + meshData.w / 2) / meshData.w;
-      const normY = (vz + meshData.h / 2) / meshData.h;
-
-      const gridX = Math.round(normX * (meshData.cols ? meshData.cols - 1 : trueN));
-      const gridY = Math.round(normY * (meshData.rows ? meshData.rows - 1 : trueM));
-      const gIdx = Math.max(0, Math.min((meshData.rows || trueM) - 1, gridY)) * (meshData.cols || trueN) + Math.max(0, Math.min((meshData.cols || trueN) - 1, gridX));
-
-      const gridVal = meshData.grid[gIdx];
-      const elevation = gridVal !== undefined && !Number.isNaN(gridVal) ? gridVal : meshData.minEv;
-      pos.setY(i, elevation * zExaggeration);
-    }
-    geo.computeVertexNormals();
-    const terrainMat = new THREE.MeshStandardMaterial({ color: 0x999999, flatShading: true, side: THREE.DoubleSide });
-    scene.add(new THREE.Mesh(geo, terrainMat));
-
-    // 2. EDIFICIOS: Extruir de la base en 3D
-    buildings3D.forEach(b => {
-      if (b.pts.length < 3) return;
-      const shape = new THREE.Shape();
-      b.pts.forEach((pt, i) => {
-        const mx = mapXtoMeters(pt.x);
-        const mz = mapYtoMetersZ(pt.y);
-        // Para que rotateX(-PI/2) convierta el Extrude Z a elevación (Y), y Z original, asuguramos Y = -Z:
-        const shapeY = -mz;
-        if (i === 0) shape.moveTo(mx, shapeY);
-        else shape.lineTo(mx, shapeY);
-      });
-      const bGeo = new THREE.ExtrudeGeometry(shape, { depth: b.height * zExaggeration, bevelEnabled: false });
-      bGeo.rotateX(-Math.PI / 2);
-      const baseElev = b.pts[0].elev * zExaggeration;
-      bGeo.translate(0, baseElev, 0);
-      const bMat = new THREE.MeshStandardMaterial({ color: 0xdddddd });
-      scene.add(new THREE.Mesh(bGeo, bMat));
-    });
-
-    // 3. VÍAS Y AGUA: Exportar como Líneas a nivel de suelo + offset
-    const lineMat = new THREE.LineBasicMaterial({ color: 0x333333 });
-    highways3D.forEach(hw => {
-      const lPts = hw.pts.map(p => new THREE.Vector3(mapXtoMeters(p.x), p.elev * zExaggeration + 0.1, mapYtoMetersZ(p.y)));
-      const lGeo = new THREE.BufferGeometry().setFromPoints(lPts);
-      scene.add(new THREE.Line(lGeo, lineMat));
-    });
-
-    const waterMat = new THREE.LineBasicMaterial({ color: 0x3b82f6 });
-    waterways3D.forEach(ww => {
-      const lPts = ww.pts.map(p => new THREE.Vector3(mapXtoMeters(p.x), p.elev * zExaggeration + 0.05, mapYtoMetersZ(p.y)));
-      const lGeo = new THREE.BufferGeometry().setFromPoints(lPts);
-      scene.add(new THREE.Line(lGeo, waterMat));
-    });
-
-    // 4. CURVAS DE NIVEL: Exportar como Líneas topográficas
-    const cMat = new THREE.LineBasicMaterial({ color: 0xc5a059 });
-    contours.forEach(c => {
-      const elev = c.value * zExaggeration;
-      const lines = c.type === 'MultiLineString' ? c.coordinates : (c.coordinates as any).flat();
-      lines.forEach((line: any) => {
-        const cPts = line.map((p: number[]) => {
-          const mx = mapXtoMeters(p[0]);
-          const mz = mapYtoMetersZ(p[1]);
-          return new THREE.Vector3(mx, elev + 0.05, mz); // offset sutil
-        });
-        const cGeo = new THREE.BufferGeometry().setFromPoints(cPts);
-        scene.add(new THREE.Line(cGeo, cMat));
-      });
-    });
-
-    return scene;
-  };
-
   const handleExportSTL = async () => {
     if (!meshData) return;
-
-    // Importar dinámicamente
-    const THREE = await import('three');
-    const { STLExporter } = await import('three-stdlib');
-
-    const scene = buildThreeScene(THREE);
-    if (!scene) return;
-
-    // EXPORTAR A STL (Binary)
-    const exporter = new STLExporter();
-    const result = exporter.parse(scene, { binary: true });
-
-    // STL result es un DataView si usamos binary: true
-    const dataView = result as any as DataView;
-    const blob = new Blob([dataView.buffer as ArrayBuffer], { type: 'application/octet-stream' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `modelo_${fileName.replace(/\.[^/.]+$/, "")}.stl`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    await exportToStl({
+      meshData,
+      zExaggeration,
+      fileName,
+    });
   };
 
 
