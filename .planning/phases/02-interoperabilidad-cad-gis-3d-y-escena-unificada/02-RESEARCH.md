@@ -531,12 +531,10 @@ export function generateSvgTopographicSheet(params: {
 | A1 | Todas las mallas locales `.PLY` o `.FBX` que cargue el usuario deben orientarse automáticamente deduciendo su eje vertical mediante comparación de varianza de dimensiones XYZ (`meshProcessor.ts:70-76`). | Architecture Patterns | Si una malla fotogramétrica es perfectamente cúbica, podría interpretarse un eje vertical no deseado; mitigable añadiendo control de inversión en UI si surge demanda. |
 | A2 | Para mallas fotogramétricas locales sin `bbox`, la exportación DXF debe emitir coordenadas métricas locales `(0..w, 0..h)` relativas al origen de la malla. | Architecture Patterns | Bajo impacto: es el comportamiento estándar para archivos CAD sin georreferenciación global. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **¿Debe el exportador DXF incluir información de texto de cotas sobre las curvas de nivel?**
-   - What we know: AutoCAD admite entidades `TEXT` o `MTEXT`, pero suelen generar desorden visual si no están perfectamente alineadas y escaladas.
-   - What's unclear: Si los arquitectos prefieren las cotas embebidas en el polígono 3D (cota Z real) o como texto 2D adicional.
-   - Recommendation: Cada vértice de polilínea en la capa `CONTOURS` ya tiene su coordenada Z real asignada (`z.toFixed(3)`). Para esta fase, la geometría 3D pura en AutoCAD permite consultar la elevación con cualquier herramienta de acotado CAD sin saturar el dibujo con entidades de texto superpuestas.
+   - RESOLVED: Cada vértice de polilínea en la capa `CONTOURS` ya tiene su coordenada Z real asignada (`z.toFixed(3)`). Para esta fase, la geometría 3D pura en AutoCAD permite consultar la elevación con cualquier herramienta de acotado CAD sin saturar el dibujo con entidades de texto superpuestas. Mantener geometría 3D pura con cotas Z reales en cada vértice sin saturar con entidades TEXT 2D adicionales.
 
 ## Environment Availability
 
