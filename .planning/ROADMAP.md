@@ -82,10 +82,10 @@ Plans:
   2. Al intentar cargar un archivo `.geoarc` corrupto, con dimensiones de grilla inconsistentes (`grid.length !== cols * rows`) o con una URL externa no segura en `satelliteTexture`, la aplicación rechaza el archivo de forma controlada mostrando un mensaje claro sin bloquear el visor.
   3. El middleware `/api/overpass` en `vite.config.ts` rechaza payloads superiores a `64 KB` y utiliza cabeceras `User-Agent` legítimas, mientras que el bundle de producción compilado (`npm run build`) no expone `GEMINI_API_KEY`.
   4. `package.json` se encuentra libre de paquetes inactivos (`@google/genai`, `express`, `dotenv`, `tsx`), separa correctamente `dependencies` y `devDependencies`, y todos sus scripts (`build`, `test`, `lint`, `clean`) se ejecutan sin errores en Windows PowerShell.
-**Plans:** 2 plans
+**Plans:** 1/2 plans executed
 Plans:
 **Wave 1**
-- [ ] 04-01-PLAN.md — Seguridad, validación estricta de entradas .geoarc, blindaje de proxy Overpass e higiene de dependencias (QUAL-03)
+- [x] 04-01-PLAN.md — Seguridad, validación estricta de entradas .geoarc, blindaje de proxy Overpass e higiene de dependencias (QUAL-03)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 04-02-PLAN.md — Configuración de Vitest y suite exhaustiva de pruebas unitarias normativas, solares, cartográficas y de exportación (QUAL-01)
@@ -101,4 +101,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 1. Precisión Normativa OGUC y Motor Solar | 2/2 | Complete | 2026-10-28 |
 | 2. Interoperabilidad CAD / GIS / 3D y Escena Unificada | 2/2 | Complete | 2026-10-29 |
 | 3. Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | 2/2 | Complete    | 2026-10-29 |
-| 4. Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura | 0/2 | Not started | - |
+| 4. Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura | 1/2 | In Progress | - |

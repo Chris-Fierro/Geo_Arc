@@ -3,19 +3,18 @@ gsd_state_version: "1.0"
 milestone: v1.4
 current_phase: 4
 current_phase_name: Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura
-current_plan: Not started
-status: planning
-stopped_at: Phase 03 complete, ready to plan Phase 4
-last_updated: "2026-10-29T20:42:51.571Z"
+current_plan: 2
+status: in_progress
+stopped_at: Completed 04-01-PLAN.md
+last_updated: "2026-10-29T21:19:21.124Z"
 last_activity: 2026-10-29
-last_activity_desc: Phase 03 complete, transitioned to Phase 4
-state_head: 2eb82ae727c866af5ef5594bf3695e4a4a5e3bfa
+last_activity_desc: Completed 04-01-PLAN.md
+state_head: 69671002f4d664cd486fb2acff1902a5398c4b03
 progress:
   total_phases: 4
   completed_phases: 3
-  total_plans: 6
-  completed_plans: 6
-  percent: 75
+  total_plans: 8
+  completed_plans: 7
 ---
 
 # Project State
@@ -25,16 +24,17 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-28)
 
 **Core value:** Permitir a un arquitecto delimitar un lote real a escala predial, evaluar con precisión matemática y normativa su envolvente y sombra OGUC junto con su contexto urbano/topográfico, y exportar geometrías 2D/3D fieles y georreferenciadas para su flujo de diseño en CAD/BIM.
-**Current focus:** Phase 02 — Interoperabilidad CAD / GIS / 3D y Escena Unificada (Complete)
+**Current focus:** Phase 04 — Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura (In progress)
 
 ## Current Position
 
 Phase: 4 — Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura
-Current Plan: Not started
-Status: Ready to plan
-Last activity: 2026-10-29 — Phase 03 complete, transitioned to Phase 4
+Current Plan: 2 of 2
+Total Plans in Phase: 2
+Status: In progress
+Last activity: 2026-10-29 — Completed 04-01-PLAN.md
 
-Progress: [████████░░] 75% (Phase 1 & 2 complete)
+Progress: [█████████░] 87% (Phase 4 Plan 1 complete)
 
 ## Performance Metrics
 
@@ -70,6 +70,7 @@ Progress: [████████░░] 75% (Phase 1 & 2 complete)
 | Phase 02 P02 | 18min | 2 tasks | 4 files |
 | Phase 03 P01 | 8min | 2 tasks | 2 files |
 | Phase 03 P02 | 10m | 3 tasks | 3 files |
+| Phase 04 P01 | 6min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -96,6 +97,11 @@ Recent decisions affecting current work:
 - [Phase 03]: D-03: Implementación y exportación de disposeObjectTree para liberación recursiva de geometrías, materiales y texturas WebGL antes de scene.remove y en el desmontaje
 - [Phase 03]: D-01: Native IndexedDB storage service in pure TypeScript (geoarc_db / project_session) without external npm packages.
 - [Phase 03]: D-04: Single-pass aspect-ratio DEM sampling in OsmImporter and elimination of dummy button and orphaned states.
+- [Phase 04]: Blindar /api/overpass con 64 KB de buffer y HTTP 413 con req.destroy() para mitigar DoS en Node.js dev server
+- [Phase 04]: Eliminar la inyeccion de GEMINI_API_KEY en define de vite.config.ts para evitar fugas en el cliente de produccion
+- [Phase 04]: Crear src/lib/geoarcValidator.ts como funcion pura para validar esquemas .geoarc de forma determinista y comprobable
+- [Phase 04]: Restringir satelliteTexture en .geoarc a prefijos data:image/jpeg;base64,, data:image/png;base64, o blob: para neutralizar vectores SSRF y XSS
+- [Phase 04]: Remover 5 dependencias huerfanas en package.json y sustituir rm -rf dist por node -e fs.rmSync nativo para compatibilidad multiplataforma
 
 ### Pending Todos
 
@@ -115,6 +121,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-29T20:35:33.801Z
-Stopped at: Phase 03 complete, ready to plan Phase 4
+Last session: 2026-10-29T21:19:20.630Z
+Stopped at: Completed 04-01-PLAN.md
 Resume file: None

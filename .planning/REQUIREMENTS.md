@@ -30,7 +30,7 @@
 
 - [ ] **QUAL-01**: El repositorio cuenta con `Vitest` configurado y una suite de pruebas automatizadas que valida el motor OGUC (`ogucService.ts`), el motor solar (`SunPosition.ts`), el cálculo de métricas de polígonos, las conversiones CRS/UTM y los constructores de exportación.
 - [x] **QUAL-02**: La construcción de geometrías Three.js (terreno y extrusión de edificios con empotramiento en pendiente) está unificada en un módulo compartido consumido por `ThreeTerrainViewer.tsx` y todas las exportaciones 3D (`.GLB`, `.OBJ`, `.STL`).
-- [ ] **QUAL-03**: La carga de archivos `.geoarc` valida el esquema e integridad de `meshData` y `satelliteTexture`, el proxy `/api/overpass` (`vite.config.ts`) impone límite de payload (`64 KB`) y cabeceras limpias, se remueve la inyección de `GEMINI_API_KEY` en el cliente y se depuran paquetes no usados y scripts en `package.json`.
+- [x] **QUAL-03**: La carga de archivos `.geoarc` valida el esquema e integridad de `meshData` y `satelliteTexture`, el proxy `/api/overpass` (`vite.config.ts`) impone límite de payload (`64 KB`) y cabeceras limpias, se remueve la inyección de `GEMINI_API_KEY` en el cliente y se depuran paquetes no usados y scripts en `package.json`.
 
 ## v2 Requirements (Deferred)
 
@@ -65,7 +65,7 @@
 | PERF-03 | Phase 3: Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | Complete |
 | PERF-04 | Phase 3: Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | Complete |
 | QUAL-01 | Phase 4: Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura | Pending |
-| QUAL-03 | Phase 4: Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura | Pending |
+| QUAL-03 | Phase 4: Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura | Complete |
 
 **Coverage:**
 - v1 requirements: 15 total
