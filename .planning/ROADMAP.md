@@ -49,7 +49,7 @@ Plans:
 **Plans:** 2 plans
 Plans:
 **Wave 1**
-- [ ] 02-01-PLAN.md — Servicio de proyección cartográfica Snyder WGS84/UTM (`src/lib/crsService.ts`), Worldfile `.JGW` georreferenciado y serialización `.DXF` con recorte `clipWayToBBox`, edificios `relation` y cota Z bilineal (`CAD-01`, `CAD-03`)
+- [x] 02-01-PLAN.md — Servicio de proyección cartográfica Snyder WGS84/UTM (`src/lib/crsService.ts`), Worldfile `.JGW` georreferenciado y serialización `.DXF` con recorte `clipWayToBBox`, edificios `relation` y cota Z bilineal (`CAD-01`, `CAD-03`)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 02-02-PLAN.md — Constructor unificado Three.js en `exportService.ts` (`.STL`/`.GLB`/`.OBJ`/Visor 3D) con empotramiento de 0.35m, dropzone local `.PLY`/`.FBX` en `App.tsx`, selector CRS y botón de lámina vectorial `.SVG` (`CAD-02`, `CAD-04`, `QUAL-02`)
@@ -87,6 +87,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Precisión Normativa OGUC y Motor Solar | 2/2 | Complete    | 2026-10-28 |
-| 2. Interoperabilidad CAD / GIS / 3D y Escena Unificada | 0/2 | Not started | - |
+| 2. Interoperabilidad CAD / GIS / 3D y Escena Unificada | 1/2 | In progress | - |
 | 3. Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | 0/TBD | Not started | - |
 | 4. Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura | 0/TBD | Not started | - |

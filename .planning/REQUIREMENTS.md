@@ -14,9 +14,9 @@
 
 ### Interoperabilidad CAD / GIS / 3D (`CAD`)
 
-- [ ] **CAD-01**: El usuario puede exportar archivos `.DXF` donde las vías y cuerpos de agua se recortan limpiamente al BBox (`clipWayToBBox`), se incluyen edificios multipolígono (`type === 'relation'`) y las elevaciones Z se muestrean mediante interpolación bilineal.
+- [x] **CAD-01**: El usuario puede exportar archivos `.DXF` donde las vías y cuerpos de agua se recortan limpiamente al BBox (`clipWayToBBox`), se incluyen edificios multipolígono (`type === 'relation'`) y las elevaciones Z se muestrean mediante interpolación bilineal.
 - [ ] **CAD-02**: El usuario puede exportar mallas `.STL` cuya geometría de terreno y edificios (normalización de cota Z relativa a `minEv` y empotramiento de `0.35m` en pendiente) es idéntica a la generada para `.GLB`, `.OBJ` y el visor 3D.
-- [ ] **CAD-03**: El usuario puede seleccionar un Sistema de Referencia (`CRS`: `EPSG:32718` UTM 18S, `EPSG:32719` UTM 19S, `EPSG:32633` o `EPSG:4326`) y obtener coordenadas reproyectadas reales tanto en la exportación `.DXF` como en el archivo Worldfile `.JGW`.
+- [x] **CAD-03**: El usuario puede seleccionar un Sistema de Referencia (`CRS`: `EPSG:32718` UTM 18S, `EPSG:32719` UTM 19S, `EPSG:32633` o `EPSG:4326`) y obtener coordenadas reproyectadas reales tanto en la exportación `.DXF` como en el archivo Worldfile `.JGW`.
 - [ ] **CAD-04**: El usuario puede importar archivos locales de malla 3D (`.PLY` y `.FBX` mediante `processMeshFile`) desde la barra lateral y exportar directamente la lámina vectorial topográfica en formato `.SVG` (`topografia_*.svg`).
 
 ### Rendimiento, Memoria WebGL y Persistencia (`PERF`)
@@ -55,9 +55,9 @@
 | OGUC-02 | Phase 1: Precisión Normativa OGUC y Motor Solar | Complete |
 | OGUC-03 | Phase 1: Precisión Normativa OGUC y Motor Solar | Complete |
 | OGUC-04 | Phase 1: Precisión Normativa OGUC y Motor Solar | Complete |
-| CAD-01 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Pending |
+| CAD-01 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Complete |
 | CAD-02 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Pending |
-| CAD-03 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Pending |
+| CAD-03 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Complete |
 | CAD-04 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Pending |
 | QUAL-02 | Phase 2: Interoperabilidad CAD / GIS / 3D y Escena Unificada | Pending |
 | PERF-01 | Phase 3: Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | Pending |

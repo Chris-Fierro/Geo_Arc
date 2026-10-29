@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v1.4
 current_phase: 2
 current_phase_name: Interoperabilidad CAD / GIS / 3D y Escena Unificada
-status: planning
-stopped_at: Phase 01 complete, ready to plan Phase 2
-last_updated: "2026-10-29T01:37:53.560Z"
+status: in-progress
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-10-29T02:26:00.000Z"
 last_activity: 2026-10-28
-last_activity_desc: Phase 01 complete, transitioned to Phase 2
-state_head: 096649e4b4a369deab980384f2f2e5f742a49f3d
+last_activity_desc: Completed 02-01-PLAN.md (Snyder UTM cartography and clean DXF export)
+state_head: 863b7a05a7a04285c62cb62774707f2e42e55121
 progress:
   total_phases: 4
   completed_phases: 1
-  total_plans: 2
-  completed_plans: 2
-  percent: 25
+  total_plans: 4
+  completed_plans: 3
+  percent: 75
 ---
 
 # Project State
@@ -24,36 +24,37 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-28)
 
 **Core value:** Permitir a un arquitecto delimitar un lote real a escala predial, evaluar con precisión matemática y normativa su envolvente y sombra OGUC junto con su contexto urbano/topográfico, y exportar geometrías 2D/3D fieles y georreferenciadas para su flujo de diseño en CAD/BIM.
-**Current focus:** Phase 01 — Precisión Normativa OGUC y Motor Solar
+**Current focus:** Phase 02 — Interoperabilidad CAD / GIS / 3D y Escena Unificada
 
 ## Current Position
 
 Phase: 2 — Interoperabilidad CAD / GIS / 3D y Escena Unificada
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-10-28 — Phase 01 complete, transitioned to Phase 2
+Plan: 02-01 complete, ready for 02-02
+Status: In progress
+Last activity: 2026-10-28 — Completed 02-01-PLAN.md
 
-Progress: [███░░░░░░░] 25%
+Progress: [███████░░░] 75%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 2
-- Average duration: 0 min
-- Total execution time: 0.0 hours
+- Total plans completed: 3
+- Average duration: 9 min
+- Total execution time: 0.45 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 1. Precisión Normativa OGUC y Motor Solar | 0 | - | - |
-| 2. Interoperabilidad CAD / GIS / 3D y Escena Unificada | 0 | - | - |
+| 1. Precisión Normativa OGUC y Motor Solar | 2 | 14min | 7min |
+| 2. Interoperabilidad CAD / GIS / 3D y Escena Unificada | 1 | 12min | 12min |
 | 3. Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | 0 | - | - |
 | 4. Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura | 0 | - | - |
 | 01 | 2 | - | - |
+| 02 | 1 | - | - |
 
 **Recent Trend:**
-- Last 5 plans: -
+- Last 5 plans: 6min, 8min, 12min
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -63,6 +64,7 @@ Progress: [███░░░░░░░] 25%
 |------|----------|-------|-------|
 | Phase 01 P01 | 6min | 2 tasks | 1 files |
 | Phase 01 P02 | 8min | 2 tasks | 3 files |
+| Phase 02 P01 | 12min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -70,6 +72,10 @@ Progress: [███░░░░░░░] 25%
 
 Decisions are logged in PROJECT.md Key Decisions table.
 Recent decisions affecting current work:
+
+- [Phase 02]: D-04: Implementar proyección determinista Snyder (1987) pura en TypeScript sin dependencias npm externas para husos UTM chilenos (18S, 19S), UTM 33N y EPSG:4326.
+- [Phase 02]: D-01: Centralizar serialización DXF R15 métrica en exportService.ts con recorte limpio Liang-Barsky para vías y cursos de agua al BBox, suprimiendo líneas perimetrales parásitas.
+- [Phase 02]: D-02: Procesar edificios OSM de tipo relation (multipolígonos) como polilíneas cerradas en capa BUILDINGS e interpolar cotas Z de forma bilineal continua.
 
 - [Init]: Priorizar API oficial OpenStreetMap v0.6 (`map.json`) antes de Overpass para reducir descargas a ~2.6s.
 - [Init]: Consolidar constructores Three.js en un servicio compartido para eliminar discrepancias de cota Z y empotramiento entre `.GLB`/`.OBJ`, `.STL` y `ThreeTerrainViewer`.
