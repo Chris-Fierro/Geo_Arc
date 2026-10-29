@@ -21,13 +21,13 @@
     {
       "number": "4",
       "name": "Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura",
-      "status": "pending"
+      "status": "complete"
     }
   ],
   "next": {
-    "command": "/gsd-progress --next",
-    "label": "Advance to the next step (plan phase 4)",
-    "reason": "Phase 4 of 4 — needs a plan"
+    "command": "/gsd-new-milestone",
+    "label": "Start a new milestone",
+    "reason": "All phases complete — start a new milestone"
   },
-  "updated_at": "2026-10-29T20:42:51.637Z"
+  "updated_at": "2026-10-29T21:35:10.308Z"
 }
