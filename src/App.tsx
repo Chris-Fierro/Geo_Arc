@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Upload, Download, Settings2,
-  MapPin, SlidersHorizontal, Beaker, Map as MapIcon,
+  MapPin, SlidersHorizontal, Map as MapIcon,
   Sun, Moon, Globe, Layers, Box, Image as ImageIcon,
   PanelLeftClose, PanelLeftOpen,
   RotateCcw, CheckCircle2, AlertTriangle, X
@@ -60,7 +60,6 @@ export default function App() {
   const [colorPalette, setColorPalette] = useState<'termico' | 'tecnico' | 'hipso'>('tecnico');
   const [masterIntervalCount, setMasterIntervalCount] = useState<number>(5);
   const [showContourLabels, setShowContourLabels] = useState<boolean>(true);
-  const [isProcessing, setIsProcessing] = useState(false);
   const [isDone, setIsDone] = useState(false);
 
   // Session Persistence State
@@ -128,7 +127,6 @@ export default function App() {
   // File and Mesh state
   const [fileName, setFileName] = useState<string>('terreno_osm.json');
   const [meshData, setMeshData] = useState<MeshData | undefined>(undefined);
-  const [osmDataRaw, setOsmDataRaw] = useState<any>(null);
 
   // Auto-sanitize coastal bathymetry (< 0m submarine trench values) in active or imported meshData
   useEffect(() => {
@@ -317,94 +315,22 @@ export default function App() {
     setShowResetConfirm(false);
   };
 
-  const handleSimulateProcess = async () => {
-    setIsProcessing(true);
-    setIsDone(false);
-
-    await new Promise(r => setTimeout(r, 600));
-
-    setIsProcessing(false);
-    setIsDone(true);
-  };
-
   const handleOsmDataFetched = (data: any, name: string) => {
-    setOsmDataRaw(data);
     setFileName(name);
 
-    if (data && data.type === 'topo' && data.topoData && data.topoData.results) {
-      const steps = data.steps || 10;
-
-      // Build a 10x10 elevation array
-      const elevArray = new Float32Array(steps * steps);
-      let minEv = Infinity;
-      let maxEv = -Infinity;
-
-      data.topoData.results.forEach((res: any) => {
-        let elevation = res.elevation;
-        if (elevation !== null && elevation !== undefined && elevation > -10000) {
-          elevation = Math.max(0, elevation);
-          if (elevation < minEv) minEv = elevation;
-          if (elevation > maxEv) maxEv = elevation;
-        }
-      });
-
-      if (minEv === Infinity) { minEv = 0; maxEv = 10; }
-      if (maxEv === minEv) { maxEv = minEv + 1; }
-
-      const fallbackEv = minEv;
-
-      data.topoData.results.forEach((res: any, idx: number) => {
-        let elevation = res.elevation;
-        if (elevation == null || Number.isNaN(elevation) || elevation < -10000) elevation = fallbackEv;
-        else elevation = Math.max(0, elevation);
-        elevArray[idx] = elevation;
-      });
-
-      // We want to interpolate this to a maxDim grid (e.g. 150x150)
-      const maxDim = 150;
+    if (data && data.type === 'topo' && data.topoData && data.topoData.grid) {
       const { minLat, maxLat, minLon, maxLon } = data.bbox;
       const latRange = maxLat - minLat || 1;
-      const lonRange = (maxLon - minLon) * Math.cos((minLat + maxLat) / 2 * Math.PI / 180) || 1;
+      const lonRange = (maxLon - minLon) * Math.cos(((minLat + maxLat) / 2) * Math.PI / 180) || 1;
 
-      let cols, rows;
-      if (lonRange > latRange) {
-        cols = maxDim;
-        rows = Math.max(10, Math.floor(maxDim * (latRange / lonRange)));
-      } else {
-        rows = maxDim;
-        cols = Math.max(10, Math.floor(maxDim * (lonRange / latRange)));
-      }
-
-      const grid = new Float32Array(cols * rows);
-
-      // Bilinear interpolation from steps x steps to cols x rows
-      for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          // position in original grid (0 to steps - 1)
-          const srcY = (r / Math.max(1, rows - 1)) * (steps - 1);
-          const srcX = (c / Math.max(1, cols - 1)) * (steps - 1);
-
-          const y0 = Math.floor(srcY);
-          const y1 = Math.min(steps - 1, y0 + 1);
-          const x0 = Math.floor(srcX);
-          const x1 = Math.min(steps - 1, x0 + 1);
-
-          const ty = srcY - y0;
-          const tx = srcX - x0;
-
-          const v00 = elevArray[y0 * steps + x0];
-          const v10 = elevArray[y0 * steps + x1];
-          const v01 = elevArray[y1 * steps + x0];
-          const v11 = elevArray[y1 * steps + x1];
-
-          const val = (1 - ty) * ((1 - tx) * v00 + tx * v10) + ty * ((1 - tx) * v01 + tx * v11);
-          grid[r * cols + c] = val;
-        }
-      }
+      const cols = data.topoData.cols;
+      const rows = data.topoData.rows;
+      const minEv = data.topoData.minEv ?? 0;
+      const maxEv = data.topoData.maxEv ?? (minEv + 1);
 
       // A light smooth to remove any pixel stepping artifacts from the Terrarium DEM
-      let currentGrid = grid;
-      let tempGrid = new Float32Array(cols * rows);
+      const currentGrid = new Float32Array(data.topoData.grid);
+      const tempGrid = new Float32Array(cols * rows);
       const BLUR_PASSES = 1;
 
       for (let pass = 0; pass < BLUR_PASSES; pass++) {
@@ -472,7 +398,6 @@ export default function App() {
         setLocationLat((data.bbox.minLat + data.bbox.maxLat) / 2);
         setLocationLon((data.bbox.minLon + data.bbox.maxLon) / 2);
       }
-
     } else {
       setMeshData(undefined);
     }
@@ -1281,24 +1206,6 @@ export default function App() {
                 </div>
               </div>
             </div>
-
-            <button
-              onClick={handleSimulateProcess}
-              disabled={isProcessing}
-              className="mt-5 w-full py-2.5 bg-accent text-white text-[10px] font-bold uppercase tracking-widest hover:bg-accent-hover transition-colors rounded-sm flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed"
-            >
-              {isProcessing ? (
-                <span className="flex items-center gap-2">
-                  <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                  Procesando Malla...
-                </span>
-              ) : (
-                <span className="flex items-center gap-2">
-                  <Beaker size={14} />
-                  Generar Visualización 3d
-                </span>
-              )}
-            </button>
           </div>
         </motion.aside>
       )}
@@ -1384,20 +1291,13 @@ export default function App() {
 
             {/* Content Area */}
             <div className="flex-1 relative z-10 overflow-hidden w-full h-full flex flex-col p-0">
-              {(!isDone && !isProcessing) ? (
+              {!isDone ? (
                 <div className="h-full flex flex-col items-center justify-center text-text-subtle p-6 text-center max-w-md mx-auto">
                   <MapIcon size={36} className="mb-3 opacity-40 text-accent" />
-                  <h3 className="text-sm font-bold text-text-main mb-1">Ningún terreno seleccionado</h3>
+                  <h3 className="text-sm font-bold text-text-main mb-1">Ningún terreno cargado en sesión</h3>
                   <p className="text-xs text-text-faded leading-relaxed">
-                    Delimita un área predial en el mapa satelital OSM o carga una malla 3D local (.PLY / .FBX) para visualizar curvas de nivel y normativa.
+                    Extrae un área predial desde el mapa OSM o carga una malla 3D local (.PLY / .FBX) para comenzar el análisis normativo y topográfico.
                   </p>
-                </div>
-              ) : isProcessing ? (
-                <div className="h-full flex flex-col items-center justify-center">
-                  <div className="flex flex-col gap-4 text-accent animate-pulse items-center">
-                    <SlidersHorizontal size={24} />
-                    <p className="text-[10px] uppercase tracking-[0.15em] font-semibold">Calculando álgebra de mapas e interpolando vértices...</p>
-                  </div>
                 </div>
               ) : (
                 <div className="w-full flex-1 h-full min-h-0 flex justify-center items-center relative overflow-hidden">

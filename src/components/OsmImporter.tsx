@@ -704,18 +704,47 @@ export default function OsmImporter({ onDataFetched }: OsmImporterProps) {
         return (1 - ty) * ((1 - tx) * v00 + tx * v10) + ty * ((1 - tx) * v01 + tx * v11);
       };
 
-      const steps = 150;
-      const results = [];
-      for (let i = 0; i < steps; i++) {
-         const lat = maxLat - (maxLat - minLat) * (i / (steps - 1));
-         for (let j = 0; j < steps; j++) {
-            const lon = minLon + (maxLon - minLon) * (j / (steps - 1));
-            results.push({
-               latitude: lat,
-               longitude: lon,
-               elevation: getElevation(lat, lon)
-            });
-         }
+      const maxDim = 150;
+      const latRange = maxLat - minLat || 1;
+      const lonRange = (maxLon - minLon) * Math.cos(((minLat + maxLat) / 2) * Math.PI / 180) || 1;
+
+      let cols: number;
+      let rows: number;
+      if (lonRange > latRange) {
+        cols = maxDim;
+        rows = Math.max(10, Math.floor(maxDim * (latRange / lonRange)));
+      } else {
+        rows = maxDim;
+        cols = Math.max(10, Math.floor(maxDim * (lonRange / latRange)));
+      }
+
+      const grid = new Float32Array(cols * rows);
+      let minEv = Infinity;
+      let maxEv = -Infinity;
+
+      for (let r = 0; r < rows; r++) {
+        const lat = maxLat - (maxLat - minLat) * (r / Math.max(1, rows - 1));
+        for (let c = 0; c < cols; c++) {
+          const lon = minLon + (maxLon - minLon) * (c / Math.max(1, cols - 1));
+          let ev = getElevation(lat, lon);
+          if (ev != null && !Number.isNaN(ev) && ev > -10000) {
+            ev = Math.max(0, ev);
+            if (ev < minEv) minEv = ev;
+            if (ev > maxEv) maxEv = ev;
+          }
+          grid[r * cols + c] = ev;
+        }
+      }
+      if (minEv === Infinity) { minEv = 0; maxEv = 10; }
+      if (maxEv === minEv) { maxEv = minEv + 1; }
+
+      // Normalizar fallbacks si algún píxel quedó fuera de rango
+      for (let idx = 0; idx < grid.length; idx++) {
+        if (grid[idx] == null || Number.isNaN(grid[idx]) || grid[idx] < -10000) {
+          grid[idx] = minEv;
+        } else {
+          grid[idx] = Math.max(0, grid[idx]);
+        }
       }
       
       let buildingsData = null;
@@ -746,11 +775,10 @@ export default function OsmImporter({ onDataFetched }: OsmImporterProps) {
 
       onDataFetched({ 
         type: 'topo', 
-        topoData: { results }, 
+        topoData: { grid: Array.from(grid), cols, rows, minEv, maxEv }, 
         buildings: buildingsData,
         bbox: { minLat, maxLat, minLon, maxLon }, 
         lotPolygon: polygon,
-        steps,
         satellite: satelliteResult
       }, `Relieve_${position[0].toFixed(4)}_${position[1].toFixed(4)}.json`);
     } catch (e) {
