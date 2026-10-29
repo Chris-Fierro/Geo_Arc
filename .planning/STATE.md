@@ -4,17 +4,17 @@ milestone: v1.4
 current_phase: 4
 current_phase_name: Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura
 current_plan: 2
-status: in_progress
-stopped_at: Completed 04-01-PLAN.md
-last_updated: "2026-10-29T21:19:21.124Z"
+status: complete
+stopped_at: Completed 04-02-PLAN.md
+last_updated: "2026-10-29T21:28:40.000Z"
 last_activity: 2026-10-29
-last_activity_desc: Completed 04-01-PLAN.md
-state_head: 69671002f4d664cd486fb2acff1902a5398c4b03
+last_activity_desc: Completed 04-02-PLAN.md
+state_head: 0fbd6777219809fa93e1652352955b96b4e40d07
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 8
-  completed_plans: 7
+  completed_plans: 8
 ---
 
 # Project State
@@ -24,17 +24,17 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-28)
 
 **Core value:** Permitir a un arquitecto delimitar un lote real a escala predial, evaluar con precisión matemática y normativa su envolvente y sombra OGUC junto con su contexto urbano/topográfico, y exportar geometrías 2D/3D fieles y georreferenciadas para su flujo de diseño en CAD/BIM.
-**Current focus:** Phase 04 — Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura (In progress)
+**Current focus:** Phase 04 — Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura (Complete)
 
 ## Current Position
 
 Phase: 4 — Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura
 Current Plan: 2 of 2
 Total Plans in Phase: 2
-Status: In progress
-Last activity: 2026-10-29 — Completed 04-01-PLAN.md
+Status: Complete
+Last activity: 2026-10-29 — Completed 04-02-PLAN.md
 
-Progress: [█████████░] 87% (Phase 4 Plan 1 complete)
+Progress: [██████████] 100% (Phase 4 complete)
 
 ## Performance Metrics
 
@@ -50,13 +50,13 @@ Progress: [█████████░] 87% (Phase 4 Plan 1 complete)
 | 1. Precisión Normativa OGUC y Motor Solar | 2 | 14min | 7min |
 | 2. Interoperabilidad CAD / GIS / 3D y Escena Unificada | 2 | 30min | 15min |
 | 3. Rendimiento 60 FPS, Memoria WebGL y Persistencia Local | 0 | - | - |
-| 4. Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura | 0 | - | - |
+| 4. Suite de Pruebas Vitest, Seguridad e Higiene de Arquitectura | 2 | 13min | 6.5min |
 | 01 | 2 | - | - |
 | 02 | 2 | - | - |
 | 03 | 2 | - | - |
 
 **Recent Trend:**
-- Last 5 plans: 6min, 8min, 12min, 18min
+- Last 5 plans: 7min, 6min, 10min, 8min, 18min
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -71,6 +71,7 @@ Progress: [█████████░] 87% (Phase 4 Plan 1 complete)
 | Phase 03 P01 | 8min | 2 tasks | 2 files |
 | Phase 03 P02 | 10m | 3 tasks | 3 files |
 | Phase 04 P01 | 6min | 3 tasks | 4 files |
+| Phase 04 P02 | 7min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -102,6 +103,10 @@ Recent decisions affecting current work:
 - [Phase 04]: Crear src/lib/geoarcValidator.ts como funcion pura para validar esquemas .geoarc de forma determinista y comprobable
 - [Phase 04]: Restringir satelliteTexture en .geoarc a prefijos data:image/jpeg;base64,, data:image/png;base64, o blob: para neutralizar vectores SSRF y XSS
 - [Phase 04]: Remover 5 dependencias huerfanas en package.json y sustituir rm -rf dist por node -e fs.rmSync nativo para compatibilidad multiplataforma
+- [Phase 04]: Configurar Vitest de forma aislada en vitest.config.ts con environment: 'node' y alias '@' para desacoplar el pipeline de pruebas de la compilación de Vite
+- [Phase 04]: Validar el grafo de Three.js (THREE.Scene, geometrías, empotramiento 0.35m) en memoria pura de Node sin requerir emulación WebGL pesada
+- [Phase 04]: Probar el acimut solar considerando la proximidad circular al norte (0° / 360°) para asegurar estabilidad con husos solares dinámicos
+- [Phase 04]: Silenciar advertencias esperadas de consola en tests/storage.test.ts durante pruebas de resiliencia en entornos sin IndexedDB
 
 ### Pending Todos
 
@@ -121,6 +126,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-29T21:19:20.630Z
-Stopped at: Completed 04-01-PLAN.md
+Last session: 2026-10-29T21:28:40.000Z
+Stopped at: Completed 04-02-PLAN.md
 Resume file: None
